@@ -10,7 +10,8 @@
   "text": "帮我查一下...",
   "received_at": 1729000000.0,
   "status": "new",             # new -> done
-  "reply": ""                  # Muse 处理完可回填（可选）
+  "reply": "",                 # Muse 处理完可回填（可选）
+  "reaction_id": "on_xxx"      # 可选：轮询脚本抢加 Get 后回填，worker 沿用
 }
 
 并发说明：listen 进程（append）与 worker（mark_done）是两个进程，可能同时
@@ -148,6 +149,50 @@ def list_new(path: str | Path) -> list[dict]:
             return out
     except FileNotFoundError:
         return []
+
+
+def set_reaction_id(path: str | Path, message_id: str, reaction_id: str) -> str | None:
+    """排他锁下的原子 check-and-set：给 status=new 的记录回填 reaction_id。
+
+    仅当记录 status == "new" 且尚无 reaction_id（无或空）时写入；返回生效的
+    reaction_id（已有的或新写入的）。记录不存在或 status 非 new 返回 None。
+    供轮询脚本抢先把"已收到"Get 表情记进收件箱：即使两次轮询并发到同一消息，
+    也只有一次写入生效；worker 据此跳过自加、沿用记录的值。
+    """
+    path = Path(path)
+    try:
+        with _locked(path, "r+", exclusive=True) as f:
+            lines = _read_lines(f)
+            changed = False
+            effective: str | None = None
+            out_lines = []
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    out_lines.append(line)  # 坏行原样保留
+                    continue
+                if (record.get("message_id") == message_id
+                        and record.get("status") == "new"
+                        and not (record.get("reaction_id") or "")):
+                    record["reaction_id"] = reaction_id
+                    effective = reaction_id
+                    changed = True
+                    out_lines.append(json.dumps(record, ensure_ascii=False))
+                    continue
+                if (record.get("message_id") == message_id
+                        and record.get("status") == "new"):
+                    effective = record.get("reaction_id") or ""  # 已有：不覆盖
+                out_lines.append(line)
+            if changed:
+                f.seek(0)
+                f.truncate()
+                for out_line in out_lines:
+                    f.write(out_line + "\n")
+                f.flush()
+            return effective
+    except FileNotFoundError:
+        return None
 
 
 def mark_done(path: str | Path, message_id: str, reply: str = "") -> bool:
