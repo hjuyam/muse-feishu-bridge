@@ -55,8 +55,23 @@ def cmd_listen(args) -> int:
         print(f"{'收件' if ok else '重复跳过'}: {msg.get('open_id')} → {msg.get('text')[:40]}")
 
     print("启动飞书长连接监听（Ctrl+C 退出）…")
-    FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message).start_listening()
-    return 0
+    import time
+
+    backoff = 5
+    while True:
+        start_ts = time.time()
+        try:
+            FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message).start_listening()
+            print("监听连接结束（非主动退出），准备重连…")
+        except KeyboardInterrupt:
+            print("收到退出信号，停止监听。")
+            return 0
+        except Exception as e:  # noqa: BLE001 -- 任何异常都不应杀死监听进程
+            print(f"监听异常退出: {e}")
+        # 一次跑得够久（>60s）说明不是配置问题，重置退避；否则指数退避
+        backoff = 5 if (time.time() - start_ts) > 60 else min(backoff * 2, 300)
+        print(f"{backoff} 秒后重连…")
+        time.sleep(backoff)
 
 
 def cmd_send(args) -> int:
