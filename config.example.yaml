@@ -6,10 +6,8 @@ feishu:
   app_secret: ""                   # 留空则必须用环境变量 FEISHU_APP_SECRET 提供
 
 bridge:
-  # 收件箱位置：长连接收到的消息以 JSONL 追加到这里，Muse 轮询读取
+  # 收件箱位置：长连接收到的消息以 JSONL 追加到这里；hook 每 30 秒检测到新消息才唤醒 Muse
   inbox_path: "./data/inbox.jsonl"
-  # Muse 轮询收件箱的间隔（秒）。飞书→Muse 的延迟 ≈ 长连接实时接收 + 这个间隔
-  poll_interval_sec: 20
   # 白名单：只处理这些 open_id 发来的消息（在飞书里点自己头像可看到 open_id，
   # 或先留空跑 doctor 看日志）。留空列表 = 不限制（不推荐）。
   allow_open_ids: []

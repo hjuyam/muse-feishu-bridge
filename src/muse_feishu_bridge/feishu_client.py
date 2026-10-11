@@ -54,9 +54,12 @@ class FeishuBridge:
             )
             .build()
         )
-        self._ws = lark.ws.Client(
-            app_id, app_secret, event_handler=dispatcher, log_level=log_level
-        )
+        # ws 长连接客户端懒加载：只有 listen 需要它，send/react 等纯 HTTP 调用不创建
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._log_level = log_level
+        self._dispatcher = dispatcher
+        self._ws = None
 
     @staticmethod
     def _normalize(data: P2ImMessageReceiveV1) -> dict:
@@ -82,6 +85,11 @@ class FeishuBridge:
     def start_listening(self) -> None:
         """阻塞运行长连接。注意：SDK 在某些断线场景（如 no close frame）会直接返回，
         不会自动重连——调用方（cli listen）负责捕获返回/异常并重连。"""
+        if self._ws is None:
+            self._ws = lark.ws.Client(
+                self._app_id, self._app_secret,
+                event_handler=self._dispatcher, log_level=self._log_level,
+            )
         self._ws.start()
 
     @staticmethod
@@ -151,7 +159,7 @@ class FeishuBridge:
     def add_reaction(self, message_id: str, emoji_type: str = "Get") -> str:
         """给一条消息加表情回复（Get=已收到，DONE=处理完），返回 reaction_id。
 
-        emoji_type 大小写敏感（飞书官方枚举：Get 全小写 get、DONE 全大写）。
+        emoji_type 大小写敏感（本项目约定：Get 首字母大写，DONE 全大写）。
         失败抛 RuntimeError；表情是"尽力而为"的反馈，不应阻塞主流程。
         """
         request = (

@@ -61,9 +61,53 @@ def _read_lines(f) -> list[str]:
     return [line.rstrip("\n") for line in f if line.strip()]
 
 
+def _maybe_rotate(path: Path) -> None:
+    """按月归档：如果文件里最后一条消息是上个月及以前的，整文件移走。
+
+    归档名：inbox-YYYYMM.jsonl（YYYYMM 取文件第一条记录的月份）。
+    在 append() 开头调用，无锁检查；并发时 rename 冲突由 FileNotFoundError 兜底。
+    """
+    from datetime import datetime
+
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    first_ts = last_ts = 0.0
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = float(json.loads(line).get("received_at") or 0)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    return  # 读到坏行就不动，下次再说
+                if not first_ts:
+                    first_ts = ts
+                last_ts = ts
+    except OSError:
+        return
+    if last_ts <= 0:
+        return
+    cur_month = datetime.now().strftime("%Y%m")
+    if datetime.fromtimestamp(last_ts).strftime("%Y%m") == cur_month:
+        return  # 本月还有消息，不归档
+    tag = datetime.fromtimestamp(first_ts).strftime("%Y%m") if first_ts > 0 else cur_month
+    archive = path.with_name(f"{path.stem}-{tag}{path.suffix}")
+    n = 2
+    while archive.exists():  # 极小概率重名，加序号
+        archive = path.with_name(f"{path.stem}-{tag}-{n}{path.suffix}")
+        n += 1
+    try:
+        path.rename(archive)
+    except FileNotFoundError:
+        pass  # 并发时另一进程已归档
+
+
 def append(path: str | Path, message: dict) -> bool:
     """追加一条消息；已存在的 message_id 返回 False（去重）。"""
     path = Path(path)
+    _maybe_rotate(path)
     record = {
         "message_id": message.get("message_id", ""),
         "chat_id": message.get("chat_id", ""),

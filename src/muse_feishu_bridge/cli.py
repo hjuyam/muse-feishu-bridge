@@ -33,7 +33,6 @@ def cmd_doctor(args) -> int:
     print(f"muse-feishu-bridge v{__version__}")
     print(f"app_id: {cfg.feishu.app_id[:6]}*** (已就绪，未联网验证)")
     print(f"收件箱: {cfg.bridge.inbox_path}")
-    print(f"轮询间隔: {cfg.bridge.poll_interval_sec}s")
     print(f"白名单: {cfg.bridge.allow_open_ids or '(空 = 不限制，不推荐)'}")
     print("doctor 通过。下一步：python -m muse_feishu_bridge.cli listen")
     return 0

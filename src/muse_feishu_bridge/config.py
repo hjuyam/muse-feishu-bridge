@@ -17,7 +17,6 @@ class FeishuConfig:
 @dataclass
 class BridgeConfig:
     inbox_path: Path
-    poll_interval_sec: int = 20
     allow_open_ids: list[str] = field(default_factory=list)
 
 
@@ -46,7 +45,6 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         feishu=FeishuConfig(app_id=app_id, app_secret=app_secret),
         bridge=BridgeConfig(
             inbox_path=Path(bridge_raw.get("inbox_path", "./data/inbox.jsonl")),
-            poll_interval_sec=int(bridge_raw.get("poll_interval_sec", 20)),
             allow_open_ids=list(bridge_raw.get("allow_open_ids", []) or []),
         ),
     )
