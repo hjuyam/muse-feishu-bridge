@@ -20,6 +20,7 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody,
     DeleteMessageReactionRequest,
     Emoji,
+    ListMessageRequest,
     P2ImMessageReceiveV1,
 )
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
@@ -79,8 +80,54 @@ class FeishuBridge:
         }
 
     def start_listening(self) -> None:
-        """阻塞运行长连接（内部自动重连）。"""
+        """阻塞运行长连接。注意：SDK 在某些断线场景（如 no close frame）会直接返回，
+        不会自动重连——调用方（cli listen）负责捕获返回/异常并重连。"""
         self._ws.start()
+
+    @staticmethod
+    def _normalize_history(item, chat_id: str) -> dict:
+        """把「获取历史消息」API 的 Message 转成 inbox 格式。
+
+        注意：历史 API 的 Message 模型字段名与事件推送不同（msg_type 而非
+        message_type），不要复用 _normalize。
+        """
+        sender = _get(item, "sender", default=None)
+        body = _get(item, "body", default=None)
+        raw_content = _get(body, "content", default="{}")
+        try:
+            text = json.loads(raw_content).get("text", "")
+        except (json.JSONDecodeError, AttributeError):
+            text = ""
+        # 只取 user 发的消息；bot 自己的回复 sender_type 为 app，会被上层白名单滤掉
+        open_id = _get(sender, "id") if _get(sender, "sender_type") == "user" else ""
+        return {
+            "message_id": _get(item, "message_id"),
+            "chat_id": _get(item, "chat_id", default=chat_id),
+            "chat_type": "p2p",
+            "msg_type": _get(item, "msg_type"),
+            "text": text,
+            "open_id": open_id,
+        }
+
+    def list_recent_messages(self, chat_id: str, page_size: int = 50) -> list[dict]:
+        """拉取指定会话最近的历史消息（按时间从旧到新），用于断线重连后的补拉。
+
+        飞书长连接不补发断线期间的消息，靠这个找回。失败抛 RuntimeError。
+        """
+        request = (
+            ListMessageRequest.builder()
+            .container_id_type("chat")
+            .container_id(chat_id)
+            .sort_type("ByCreateTimeDesc")
+            .page_size(page_size)
+            .build()
+        )
+        resp = self._client.im.v1.message.list(request)
+        if not resp.success():
+            raise RuntimeError(f"拉取历史消息失败: code={resp.code} msg={resp.msg}")
+        items = (resp.data.items or []) if resp.data else []
+        # API 返回新→旧，反转为旧→新，方便按序写入收件箱
+        return [self._normalize_history(it, chat_id) for it in reversed(items)]
 
     def send_text(self, chat_id: str, text: str) -> str:
         """往指定会话发文本消息，返回飞书 message_id。"""

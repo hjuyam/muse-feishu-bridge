@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import __version__
@@ -38,27 +39,85 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def _load_known_chats(inbox_path) -> set[str]:
+    """从收件箱历史里收集所有见过的 chat_id（断线补拉时用）。"""
+    from pathlib import Path
+
+    chats: set[str] = set()
+    p = Path(inbox_path)
+    if not p.exists():
+        return chats
+    try:
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cid = json.loads(line).get("chat_id")
+                except json.JSONDecodeError:
+                    continue
+                if cid:
+                    chats.add(cid)
+    except OSError:
+        pass
+    return chats
+
+
+def _backfill_recent(cfg, known_chats: set[str], on_message) -> None:
+    """重连前补拉各已知会话的近期历史。
+
+    飞书长连接不补发断线期间的消息，靠这个找回。inbox.append 按 message_id
+    去重，所以补拉是幂等的——重复跑也无害。单个会话失败只记日志，不影响其他。
+    """
+    if not known_chats:
+        return
+    from .feishu_client import FeishuBridge
+
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
+                          on_message=lambda m: None)
+    for chat_id in sorted(known_chats):
+        try:
+            msgs = bridge.list_recent_messages(chat_id)
+        except Exception as e:  # noqa: BLE001 -- 补拉失败不能拖死监听
+            print(f"历史补拉 {chat_id} 失败，已跳过: {e}")
+            continue
+        added = sum(1 for m in msgs if on_message(m))
+        if added:
+            print(f"历史补拉 {chat_id}: 找回 {added} 条断线期间的消息")
+
+
 def cmd_listen(args) -> int:
     from .feishu_client import FeishuBridge
 
     cfg = load_config(args.config)
     allow = set(cfg.bridge.allow_open_ids or [])
+    known_chats = _load_known_chats(cfg.bridge.inbox_path)
 
-    def on_message(msg: dict) -> None:
+    def on_message(msg: dict) -> bool:
+        """返回 True 表示成功写入收件箱（新消息）。"""
         if allow and msg.get("open_id") not in allow:
             print(f"忽略非白名单消息 from {msg.get('open_id')}")
-            return
+            return False
         if not msg.get("text") and msg.get("msg_type") != "text":
             print(f"暂只处理文本消息，已跳过 {msg.get('msg_type')}")
-            return
+            return False
+        if msg.get("chat_id"):
+            known_chats.add(msg["chat_id"])
         ok = inbox.append(cfg.bridge.inbox_path, msg)
         print(f"{'收件' if ok else '重复跳过'}: {msg.get('open_id')} → {msg.get('text')[:40]}")
+        return ok
 
     print("启动飞书长连接监听（Ctrl+C 退出）…")
     import time
 
     backoff = 5
     while True:
+        # 每次（重）连前先补拉：覆盖上次断线到现在的窗口；去重保证幂等
+        try:
+            _backfill_recent(cfg, set(known_chats), on_message)
+        except Exception as e:  # noqa: BLE001 -- 补拉失败绝不能拖死监听
+            print(f"历史补拉异常，已跳过: {e}")
         start_ts = time.time()
         try:
             FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message).start_listening()

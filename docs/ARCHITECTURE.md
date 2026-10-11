@@ -49,6 +49,17 @@ Muse 侧约定：
 
 去重键是飞书 `message_id`，`listen` 写入时已做过去重；Muse 重启后从收件箱继续即可。
 
+## 可靠性
+
+- **断线重连**：`cli listen` 主循环捕获任何返回/异常后指数退避重连（5s→300s；
+  单次运行超 60s 则重置退避）。SDK 在某些场景（如 no close frame）会直接返回，
+  不靠它内部重连。
+- **断线补拉**：飞书长连接不补发断线期间的消息。每次（重）连前调
+  `im.v1.message.list` 拉取各已知会话最近 50 条历史，按 `message_id` 去重写入
+  收件箱（幂等）。已知会话来自收件箱历史里的 `chat_id`。
+- **收件箱并发**：`listen`（append）与 worker（mark_done 全文件重写）是两个进程，
+  `inbox.py` 所有读写经 `fcntl.flock` 加锁（写排他、读共享），杜绝重写撕裂丢消息。
+
 ## 安全边界
 
 - 凭证只走 `config.yaml` / 环境变量，`.gitignore` 已排除。
