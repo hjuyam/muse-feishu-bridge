@@ -28,6 +28,18 @@
 
 这也是为什么本项目的定位是一座"桥"而不是"机器人"：智能在 Muse 那一侧，代码只负责传输。详细推导见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+## 消息处理反馈：Get / DONE 表情
+
+Muse 处理一条消息时，会在消息上打表情给用户即时反馈（体验优化，尽力而为，表情失败不阻塞主流程）：
+
+1. **开始处理**：给该消息加 `Get` 表情（"已收到"）——
+   `python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get`，记下返回的 `reaction_id`；
+2. **处理完并发送回复后**：删掉 `Get`，换上 `DONE`（"处理完"）——
+   `python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx`，再
+   `python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji DONE`。
+
+注意：`emoji_type` 大小写敏感，官方枚举是 `Get`（不是 `GET`）和 `DONE`（全大写），写错会报 `231001 reaction type is invalid`。hook 的 worker 指令（`hooks/feishu-inbox-watch.json` 的 prompt）里已固定这套流程。
+
 ## 快速开始
 
 ```bash
@@ -63,7 +75,7 @@ muse-feishu-bridge/
 │   ├── feishu_client.py     # 长连接收消息 + HTTP 发消息
 │   ├── inbox.py             # JSONL 收件箱：收 / 读 / 标记已处理
 │   ├── config.py            # 配置加载（环境变量可覆盖文件）
-│   └── cli.py               # 命令行：listen / send / doctor
+│   └── cli.py               # 命令行：listen / send / react / unreact / history / doctor
 └── docs/
     ├── SETUP.md             # 飞书开放平台建应用手把手
     ├── ARCHITECTURE.md      # 架构设计与选型推导

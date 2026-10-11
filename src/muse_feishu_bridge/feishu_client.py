@@ -14,8 +14,12 @@ from typing import Callable
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
     CreateMessageRequest,
     CreateMessageRequestBody,
+    DeleteMessageReactionRequest,
+    Emoji,
     P2ImMessageReceiveV1,
 )
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
@@ -96,3 +100,36 @@ class FeishuBridge:
         if not resp.success():
             raise RuntimeError(f"飞书发送失败: code={resp.code} msg={resp.msg}")
         return resp.data.message_id
+
+    def add_reaction(self, message_id: str, emoji_type: str = "Get") -> str:
+        """给一条消息加表情回复（Get=已收到，DONE=处理完），返回 reaction_id。
+
+        emoji_type 大小写敏感（飞书官方枚举：Get 全小写 get、DONE 全大写）。
+        失败抛 RuntimeError；表情是"尽力而为"的反馈，不应阻塞主流程。
+        """
+        request = (
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
+                .build()
+            )
+            .build()
+        )
+        resp = self._client.im.v1.message_reaction.create(request)
+        if not resp.success():
+            raise RuntimeError(f"加表情失败: code={resp.code} msg={resp.msg}")
+        return resp.data.reaction_id
+
+    def remove_reaction(self, message_id: str, reaction_id: str) -> None:
+        """删除之前加的表情回复（需要 add_reaction 返回的 reaction_id）。"""
+        request = (
+            DeleteMessageReactionRequest.builder()
+            .message_id(message_id)
+            .reaction_id(reaction_id)
+            .build()
+        )
+        resp = self._client.im.v1.message_reaction.delete(request)
+        if not resp.success():
+            raise RuntimeError(f"删表情失败: code={resp.code} msg={resp.msg}")

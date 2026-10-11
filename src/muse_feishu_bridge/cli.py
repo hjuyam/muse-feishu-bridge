@@ -4,6 +4,8 @@
     python -m muse_feishu_bridge.cli listen          # 长连接收消息 → 写收件箱（阻塞）
     python -m muse_feishu_bridge.cli send --chat oc_xxx --text "你好"
     python -m muse_feishu_bridge.cli history         # 查看收件箱未处理消息
+    python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get
+    python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx
 """
 from __future__ import annotations
 
@@ -67,6 +69,34 @@ def cmd_send(args) -> int:
     return 0
 
 
+def cmd_react(args) -> int:
+    from .feishu_client import FeishuBridge
+
+    cfg = load_config(args.config)
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message=lambda m: None)
+    try:
+        rid = bridge.add_reaction(args.message_id, args.emoji)
+    except RuntimeError as e:
+        print(str(e))
+        return 1
+    print(f"已加表情 {args.emoji}，reaction_id={rid}")
+    return 0
+
+
+def cmd_unreact(args) -> int:
+    from .feishu_client import FeishuBridge
+
+    cfg = load_config(args.config)
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message=lambda m: None)
+    try:
+        bridge.remove_reaction(args.message_id, args.reaction_id)
+    except RuntimeError as e:
+        print(str(e))
+        return 1
+    print("已删除表情")
+    return 0
+
+
 def cmd_history(args) -> int:
     cfg = load_config(args.config)
     items = inbox.list_new(cfg.bridge.inbox_path)
@@ -87,10 +117,17 @@ def main(argv=None) -> int:
     s = sub.add_parser("send", help="发一条文本消息")
     s.add_argument("--chat", required=True, help="chat_id，如 oc_xxx")
     s.add_argument("--text", required=True)
+    r = sub.add_parser("react", help="给一条消息加表情反馈（Get=已收到，DONE=处理完）")
+    r.add_argument("--message-id", required=True, help="飞书 message_id，如 om_xxx")
+    r.add_argument("--emoji", default="Get", help="表情类型，默认 Get（已收到），大小写敏感")
+    u = sub.add_parser("unreact", help="删除之前加的表情反馈")
+    u.add_argument("--message-id", required=True)
+    u.add_argument("--reaction-id", required=True)
     sub.add_parser("history", help="查看未处理消息")
     args = p.parse_args(argv)
     return {"doctor": cmd_doctor, "listen": cmd_listen,
-            "send": cmd_send, "history": cmd_history}[args.cmd](args)
+            "send": cmd_send, "react": cmd_react,
+            "unreact": cmd_unreact, "history": cmd_history}[args.cmd](args)
 
 
 if __name__ == "__main__":
