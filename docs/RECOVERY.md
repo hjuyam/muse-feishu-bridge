@@ -28,10 +28,10 @@ bash scripts/install.sh
 export PYTHONPATH=src
 .venv/bin/python -m muse_feishu_bridge.cli doctor
 
-# 5. 重建 hooks（轮询脚本 + 定义），让 Muse 按 SETUP.md 第 5 步接管；
-#    脚本内容见本仓库 docs/ARCHITECTURE.md 的保活说明，
-#    或让 Muse 按旧定义重建 ~/hooks/scripts/feishu-inbox-watch.sh
-#    与 ~/hooks/definitions/feishu-inbox-watch.json
+# 5. 重建 hooks（轮询脚本 + 事件定义），让 Muse 按 SETUP.md 第 5 步接管；
+#    模板就在本仓库 hooks/ 目录（feishu-inbox-watch.sh + feishu-inbox-watch.json），
+#    Muse 会按你的运行时改好 delivery 占位符并注册
+bash hooks/feishu-inbox-watch.sh   # 无 hook runtime 时只打印到 stdout，可先手工验证逻辑
 
 # 6. 手动起一次 listen（之后由 hooks 脚本保活）
 setsid nohup scripts/run_listen.sh >/dev/null 2>&1 < /dev/null &
