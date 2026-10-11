@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# 真实配置（永不提交）
+config.yaml
+.env
+
+# 运行时数据
+data/
+*.log
+*.jsonl
