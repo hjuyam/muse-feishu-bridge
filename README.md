@@ -6,8 +6,6 @@
 
 ## 完整接入清单：哪些环节要你手工做，哪些 Muse 能代办
 
-## 完整接入清单：哪些环节要你手工做，哪些 Muse 能代办
-
 完整接入一共 8 个环节。原则：**凡是要用你的身份（飞书账号登录、控制台点击、密钥）的地方，必须你手工做；凡是代码和配置能搞定的，Muse 都能代办。**`hooks/` 目录的触发器模板也是"完全解决方案"的一部分——桥要长期在线，离不开它。
 
 | # | 环节 | 谁来做 | 说明 |
@@ -54,7 +52,9 @@ muse-feishu-bridge/
 ├── README.md
 ├── config.example.yaml      # 配置模板（真实密钥永不进仓库）
 ├── requirements.txt         # lark-oapi（飞书官方 Python SDK）
-├── scripts/install.sh       # 一键建虚拟环境装依赖
+├── scripts/
+│   ├── install.sh           # 一键建虚拟环境装依赖
+│   └── run_listen.sh        # 启动长连接监听（hooks 保活脚本调它）
 ├── hooks/                   # 事件触发器模板：30s 轮询 + listen 保活 + 唤醒 worker
 │   ├── feishu-inbox-watch.sh    # 轮询脚本（bash，无密钥）
 │   ├── feishu-inbox-watch.json  # 事件定义模板（delivery 按运行时填写）
