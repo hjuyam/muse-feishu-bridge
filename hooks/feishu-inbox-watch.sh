@@ -83,6 +83,28 @@ if [ "${#to_wake[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# ---- 立即 Get：扫到新消息先加"已收到"表情，不等 worker 冷启动 ----
+# 只对收件箱中尚无 reaction_id 的记录操作；任何失败只 log，绝不阻断 wake。
+if [ "$DRY" != "1" ] && [ "${#to_wake[@]}" -gt 0 ]; then
+  no_react=()
+  while IFS= read -r mid; do
+    [ -n "$mid" ] || continue
+    rid=$(jq -r --arg m "$mid" 'select(.message_id==$m) | .reaction_id // ""' "$INBOX" 2>/dev/null | head -n1 || true)
+    [ -z "$rid" ] && no_react+=("$mid")
+  done <<< "$(printf '%s\n' "${to_wake[@]}")"
+  if [ "${#no_react[@]}" -gt 0 ]; then
+    react_tsv=$(timeout 25 env PYTHONPATH="$BRIDGE/src" "$BRIDGE/.venv/bin/python" \
+      -m muse_feishu_bridge.cli react-batch --emoji Get "${no_react[@]}" 2>/dev/null || true)
+    while IFS=$'\t' read -r rmid rrid; do
+      [ -n "$rmid" ] && [ -n "$rrid" ] || continue
+      PYTHONPATH="$BRIDGE/src" "$BRIDGE/.venv/bin/python" -c \
+        'import sys; from muse_feishu_bridge import inbox; inbox.set_reaction_id(sys.argv[1], sys.argv[2], sys.argv[3])' \
+        "$INBOX" "$rmid" "$rrid" 2>/dev/null || true
+    done <<< "$react_tsv"
+    log "已为 ${#no_react[@]} 条新消息尝试加 Get 表情" '{}'
+  fi
+fi
+
 # 记录已唤起，避免重复 wake（dry run 不写 state）
 if [ "$DRY" != "1" ]; then
   tmp=$(mktemp)

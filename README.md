@@ -32,9 +32,9 @@
 
 Muse 处理一条消息时，会在消息上打表情给用户即时反馈（体验优化，尽力而为，表情失败不阻塞主流程）：
 
-1. **开始处理**：给该消息加 `Get` 表情（"已收到"）——
-   `python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get`，记下返回的 `reaction_id`；
-2. **处理完并发送回复后**：删掉 `Get`，换上 `DONE`（"处理完"）——
+1. **扫到新消息**：轮询脚本（`hooks/feishu-inbox-watch.sh`）发现 `status=new` 的消息后、唤醒 worker 之前，立即经 `react-batch` 给消息加 `Get` 表情（"已收到"），并把返回的 `reaction_id` 原子写回收件箱记录——不等 worker 冷启动（几分钟），用户 30 秒内就能看到反馈；
+2. **worker 处理时**：若收件箱记录已有 `reaction_id` 则跳过自加 `Get`，直接沿用（避免重复加）；若无记录（脚本侧加失败）则按旧流程自己加；
+3. **处理完并发送回复后**：删掉 `Get`，换上 `DONE`（"处理完"）——
    `python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx`，再
    `python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji DONE`。
 
