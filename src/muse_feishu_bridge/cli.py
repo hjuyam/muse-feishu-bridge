@@ -89,12 +89,19 @@ def _backfill_recent(cfg, known_chats: set[str], on_message) -> None:
 def cmd_listen(args) -> int:
     from .feishu_client import FeishuBridge
 
+    import threading
+
     cfg = load_config(args.config)
     allow = set(cfg.bridge.allow_open_ids or [])
     known_chats = _load_known_chats(cfg.bridge.inbox_path)
+    chats_lock = threading.Lock()  # on_message 跑在 SDK 事件线程，加锁保护 known_chats
 
     def on_message(msg: dict) -> bool:
         """返回 True 表示成功写入收件箱（新消息）。"""
+        if not msg.get("open_id"):
+            # 防御：无发送者标识的消息（bot 自己的历史消息等）一律不收，
+            # 否则白名单为空时补拉会把机器人自己的回复也写进收件箱
+            return False
         if allow and msg.get("open_id") not in allow:
             print(f"忽略非白名单消息 from {msg.get('open_id')}")
             return False
@@ -102,7 +109,8 @@ def cmd_listen(args) -> int:
             print(f"暂只处理文本消息，已跳过 {msg.get('msg_type')}")
             return False
         if msg.get("chat_id"):
-            known_chats.add(msg["chat_id"])
+            with chats_lock:
+                known_chats.add(msg["chat_id"])
         ok = inbox.append(cfg.bridge.inbox_path, msg)
         print(f"{'收件' if ok else '重复跳过'}: {msg.get('open_id')} → {msg.get('text')[:40]}")
         return ok
@@ -113,8 +121,11 @@ def cmd_listen(args) -> int:
     backoff = 5
     while True:
         # 每次（重）连前先补拉：覆盖上次断线到现在的窗口；去重保证幂等
+        # 快照 known_chats（on_message 跑在 SDK 线程，加锁防并发修改）
+        with chats_lock:
+            chats_snapshot = set(known_chats)
         try:
-            _backfill_recent(cfg, set(known_chats), on_message)
+            _backfill_recent(cfg, chats_snapshot, on_message)
         except Exception as e:  # noqa: BLE001 -- 补拉失败绝不能拖死监听
             print(f"历史补拉异常，已跳过: {e}")
         start_ts = time.time()
