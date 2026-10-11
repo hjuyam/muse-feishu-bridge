@@ -59,6 +59,20 @@ Muse 处理一条消息时，会在消息上打表情给用户即时反馈（体
 
 进度消息不影响最终的发送回执与 done 标记流程。
 
+## 支持的消息类型
+
+桥能收四种入站消息：
+
+| 类型 | 处理方式 |
+|---|---|
+| 文本 | 原样入收件箱 |
+| 富文本（post） | 转纯文本入收件箱：标题 + 段落，超链接保留文字，@ 保留被 @ 对象 |
+| 图片 | 下载原图到 `data/attachments/<message_id>/`，收件箱记录记下路径 |
+| 文件 | 同上，下载文件并记路径（单文件上限 50MB） |
+
+语音/视频/表情包等类型明确记日志跳过（`data/listen.log`），不静默丢弃。
+附件下载失败（无 key、超限、接口报错）也不丢任务：原因写进收件箱记录的 `text`，Muse 会如实转告你。
+
 ## 快速开始
 
 ```bash
@@ -91,10 +105,11 @@ muse-feishu-bridge/
 │   ├── feishu-inbox-watch.json  # 事件定义模板（delivery 按运行时填写）
 │   └── README.md                # 接入方式与运行时契约
 ├── src/muse_feishu_bridge/
-│   ├── feishu_client.py     # 长连接收消息 + HTTP 发消息
+│   ├── feishu_client.py     # 长连接收消息 + HTTP 发消息（含图片/文件下载）
 │   ├── inbox.py             # JSONL 收件箱：收 / 读 / 标记已处理
 │   ├── config.py            # 配置加载（环境变量可覆盖文件）
 │   └── cli.py               # 命令行：listen / send / react / unreact / history / doctor
+├── data/                    # 运行时数据（gitignored）：inbox.jsonl 收件箱、attachments/ 附件、listen.log
 └── docs/
     ├── SETUP.md             # 飞书开放平台建应用手把手
     ├── ARCHITECTURE.md      # 架构设计与选型推导

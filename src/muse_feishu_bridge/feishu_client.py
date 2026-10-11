@@ -1,11 +1,9 @@
 """飞书传输层：官方 lark-oapi SDK。
 
 - 收：WebSocket 长连接（无需公网 URL），收到「发给机器人的消息」事件后归一化，
-  交给调用方（cli.listen 会写入收件箱）。
+  交给调用方（cli.listen 会写入收件箱）。入站支持文本 / 富文本(post) /
+  图片 / 文件；图片与文件附件可按 key 下载。
 - 发：HTTP API 发文本消息回指定会话。
-
-已对照 lark-oapi 1.7.x 的 ws.Client / EventDispatcherHandler / im.v1.message
-编写，未经真实飞书联调，首次使用请先跑 `python -m muse_feishu_bridge.cli doctor`。
 """
 from __future__ import annotations
 
@@ -20,12 +18,18 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody,
     DeleteMessageReactionRequest,
     Emoji,
+    GetFileRequest,
+    GetImageRequest,
     ListMessageRequest,
     P2ImMessageReceiveV1,
 )
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
 MessageHandler = Callable[[dict], None]
+
+# 入站支持的消息类型。超出此范围的（如语音/视频/表情包）由调用方明确记日志
+# 跳过，不再静默丢弃——2026-10-11 前 post 消息曾被静默跳过导致用户"丢任务"。
+SUPPORTED_MSG_TYPES = ("text", "post", "image", "file")
 
 
 def _get(obj, *attrs, default=""):
@@ -34,6 +38,72 @@ def _get(obj, *attrs, default=""):
         if obj is None:
             return default
     return obj if obj != "" else default
+
+
+def _post_to_text(post: dict) -> str:
+    """把飞书富文本(post)转成纯文本：标题 + 各段落。
+
+    文本/超链接保留文字，@ 保留被 @ 对象，图片记为 [图片]，
+    其他元素（分割线等）忽略。locale 优先 zh_cn，其次 en_us。
+    """
+    if not isinstance(post, dict):
+        return ""
+    block = None
+    for locale in ("zh_cn", "en_us"):
+        if isinstance(post.get(locale), dict):
+            block = post[locale]
+            break
+    if block is None:
+        for v in post.values():
+            if isinstance(v, dict):
+                block = v
+                break
+    if not isinstance(block, dict):
+        return ""
+    lines = []
+    for para in block.get("content") or []:
+        segs = []
+        for el in para or []:
+            if not isinstance(el, dict):
+                continue
+            tag = el.get("tag")
+            if tag == "text":
+                segs.append(el.get("text", ""))
+            elif tag == "a":
+                segs.append(el.get("text") or el.get("href") or "")
+            elif tag == "at":
+                segs.append("@" + str(el.get("user_id") or el.get("text") or ""))
+            elif tag == "img":
+                segs.append("[图片]")
+        lines.append("".join(segs))
+    body = "\n".join(lines).strip()
+    title = (block.get("title") or "").strip()
+    return f"{title}\n{body}".strip() if title else body
+
+
+def _extract_content(msg_type: str, raw_content: str) -> dict:
+    """按消息类型从 content JSON 里提取 text / image_key / file_key。
+
+    text：content.text；post：转纯文本；image：image_key；
+    file：file_key（file_name 事件里通常没有，下载时再补）。
+    """
+    try:
+        content = json.loads(raw_content)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        content = {}
+    if not isinstance(content, dict):
+        content = {}
+    out = {"text": "", "image_key": "", "file_key": "", "file_name": ""}
+    if msg_type == "text":
+        out["text"] = content.get("text", "") or ""
+    elif msg_type == "post":
+        out["text"] = _post_to_text(content.get("post") or {})
+    elif msg_type == "image":
+        out["image_key"] = content.get("image_key", "") or ""
+    elif msg_type == "file":
+        out["file_key"] = content.get("file_key", "") or ""
+        out["file_name"] = content.get("file_name", "") or ""
+    return out
 
 
 class FeishuBridge:
@@ -63,22 +133,22 @@ class FeishuBridge:
 
     @staticmethod
     def _normalize(data: P2ImMessageReceiveV1) -> dict:
-        """把 SDK 事件转成 inbox.py 的消息格式。"""
+        """把 SDK 事件转成 inbox.py 的消息格式（文本/富文本/图片/文件）。"""
         event = _get(data, "event", default=None)
         msg = _get(event, "message", default=None)
         sender = _get(event, "sender", default=None)
         sender_id = _get(sender, "sender_id", default=None)
-        raw_content = _get(msg, "content", default="{}")
-        try:
-            text = json.loads(raw_content).get("text", "")
-        except (json.JSONDecodeError, AttributeError):
-            text = ""
+        msg_type = _get(msg, "message_type")
+        extracted = _extract_content(msg_type, _get(msg, "content", default="{}"))
         return {
             "message_id": _get(msg, "message_id"),
             "chat_id": _get(msg, "chat_id"),
             "chat_type": _get(msg, "chat_type"),
-            "msg_type": _get(msg, "message_type"),
-            "text": text,
+            "msg_type": msg_type,
+            "text": extracted["text"],
+            "image_key": extracted["image_key"],
+            "file_key": extracted["file_key"],
+            "file_name": extracted["file_name"],
             "open_id": _get(sender_id, "open_id"),
         }
 
@@ -101,19 +171,19 @@ class FeishuBridge:
         """
         sender = _get(item, "sender", default=None)
         body = _get(item, "body", default=None)
-        raw_content = _get(body, "content", default="{}")
-        try:
-            text = json.loads(raw_content).get("text", "")
-        except (json.JSONDecodeError, AttributeError):
-            text = ""
+        msg_type = _get(item, "msg_type")
+        extracted = _extract_content(msg_type, _get(body, "content", default="{}"))
         # 只取 user 发的消息；bot 自己的回复 sender_type 为 app，会被上层白名单滤掉
         open_id = _get(sender, "id") if _get(sender, "sender_type") == "user" else ""
         return {
             "message_id": _get(item, "message_id"),
             "chat_id": _get(item, "chat_id", default=chat_id),
             "chat_type": "p2p",
-            "msg_type": _get(item, "msg_type"),
-            "text": text,
+            "msg_type": msg_type,
+            "text": extracted["text"],
+            "image_key": extracted["image_key"],
+            "file_key": extracted["file_key"],
+            "file_name": extracted["file_name"],
             "open_id": open_id,
         }
 
@@ -188,3 +258,40 @@ class FeishuBridge:
         resp = self._client.im.v1.message_reaction.delete(request)
         if not resp.success():
             raise RuntimeError(f"删表情失败: code={resp.code} msg={resp.msg}")
+
+    # 附件下载上限：单文件超过此值拒绝下载，防止磁盘被撑爆
+    MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+    @staticmethod
+    def _read_download(resp, kind: str, key: str) -> tuple[bytes, str]:
+        """从下载响应里读出 (bytes, file_name)，带大小上限保护。"""
+        if not resp.success():
+            raise RuntimeError(f"下载{kind}失败: code={resp.code} msg={resp.msg}")
+        if resp.file is None:
+            raise RuntimeError(f"下载{kind}失败: 响应无文件内容 (key={key})")
+        chunks = []
+        total = 0
+        while True:
+            chunk = resp.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > FeishuBridge.MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(
+                    f"下载{kind}失败: 文件超过 {FeishuBridge.MAX_DOWNLOAD_BYTES // 1024 // 1024}MB 上限 (key={key})"
+                )
+            chunks.append(chunk)
+        name = resp.file_name or f"{key}.bin"
+        return b"".join(chunks), name
+
+    def download_image(self, image_key: str) -> tuple[bytes, str]:
+        """按 image_key 下载图片，返回 (文件字节, 文件名)。失败抛 RuntimeError。"""
+        request = GetImageRequest.builder().image_key(image_key).build()
+        resp = self._client.im.v1.image.get(request)
+        return self._read_download(resp, "图片", image_key)
+
+    def download_file(self, file_key: str) -> tuple[bytes, str]:
+        """按 file_key 下载文件，返回 (文件字节, 文件名)。失败抛 RuntimeError。"""
+        request = GetFileRequest.builder().file_key(file_key).build()
+        resp = self._client.im.v1.file.get(request)
+        return self._read_download(resp, "文件", file_key)

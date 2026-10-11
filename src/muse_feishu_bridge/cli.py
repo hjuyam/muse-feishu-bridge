@@ -88,7 +88,9 @@ def _backfill_recent(cfg, known_chats: set[str], on_message) -> None:
 
 
 def cmd_listen(args) -> int:
-    from .feishu_client import FeishuBridge
+    from pathlib import Path
+
+    from .feishu_client import FeishuBridge, SUPPORTED_MSG_TYPES
 
     import threading
 
@@ -96,6 +98,44 @@ def cmd_listen(args) -> int:
     allow = set(cfg.bridge.allow_open_ids or [])
     known_chats = _load_known_chats(cfg.bridge.inbox_path)
     chats_lock = threading.Lock()  # on_message 跑在 SDK 事件线程，加锁保护 known_chats
+    attach_root = Path(cfg.bridge.inbox_path).parent / "attachments"
+    # 附件下载专用桥（只做 HTTP，不建长连接；FeishuBridge 构造本身不联网）
+    media_bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
+                                on_message=lambda m: None)
+
+    def _save_attachment(msg: dict) -> None:
+        """下载图片/文件附件落盘 data/attachments/<message_id>/，回填 msg。
+
+        下载失败不抛异常：任务不能丢，失败原因写进 text，worker 会如实转告用户。
+        """
+        kind = "image" if msg.get("msg_type") == "image" else "file"
+        key = msg.get("image_key") or msg.get("file_key")
+        if not key:
+            msg["text"] = (msg.get("text") or "") + f"[{'图片' if kind == 'image' else '文件'}消息，无附件 key]"
+            return
+        try:
+            if kind == "image":
+                data, name = media_bridge.download_image(key)
+            else:
+                data, name = media_bridge.download_file(key)
+        except Exception as e:  # noqa: BLE001 -- 下载失败也要收件，不能丢任务
+            msg["text"] = (msg.get("text") or "") + f"\n[附件下载失败：{e}]"
+            print(f"附件下载失败 {msg.get('message_id')}: {e}")
+            return
+        dest_dir = attach_root / (msg.get("message_id") or "unknown")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(c for c in Path(name).name if c not in "/\\") or f"{key}.bin"
+        dest = dest_dir / safe_name
+        n = 2
+        while dest.exists():  # 同名文件加序号
+            dest = dest_dir / f"{dest.stem}-{n}{dest.suffix}"
+            n += 1
+        dest.write_bytes(data)
+        msg["file_name"] = name
+        msg["attachments"] = [{"kind": kind, "name": name, "path": str(dest)}]
+        if not msg.get("text"):
+            msg["text"] = "[图片]" if kind == "image" else f"[文件：{name}]"
+        print(f"附件已下载: {dest} ({len(data)} 字节)")
 
     def on_message(msg: dict) -> bool:
         """返回 True 表示成功写入收件箱（新消息）。"""
@@ -106,9 +146,18 @@ def cmd_listen(args) -> int:
         if allow and msg.get("open_id") not in allow:
             print(f"忽略非白名单消息 from {msg.get('open_id')}")
             return False
-        if not msg.get("text") and msg.get("msg_type") != "text":
-            print(f"暂只处理文本消息，已跳过 {msg.get('msg_type')}")
+        msg_type = msg.get("msg_type")
+        if msg_type not in SUPPORTED_MSG_TYPES:
+            # 明确记日志跳过（如语音/视频/表情包），不再静默丢弃
+            print(f"不支持的消息类型，已跳过: {msg_type} message_id={msg.get('message_id')}")
             return False
+        if inbox.exists(cfg.bridge.inbox_path, msg.get("message_id") or ""):
+            print(f"重复跳过: {msg.get('message_id')}")
+            return False
+        if msg_type in ("image", "file"):
+            _save_attachment(msg)
+        elif msg_type == "post" and not msg.get("text"):
+            msg["text"] = "[富文本消息]"
         if msg.get("chat_id"):
             with chats_lock:
                 known_chats.add(msg["chat_id"])

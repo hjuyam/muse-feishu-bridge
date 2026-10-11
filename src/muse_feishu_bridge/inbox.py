@@ -6,8 +6,12 @@
   "chat_id": "oc_xxx",         # 回复时发回这个会话
   "chat_type": "p2p",
   "open_id": "ou_xxx",         # 发送者
-  "msg_type": "text",
+  "msg_type": "text",        # text / post(富文本，已转纯文本) / image / file
   "text": "帮我查一下...",
+  "image_key": "",          # 图片消息的飞书 key（image 类型有）
+  "file_key": "",           # 文件消息的飞书 key（file 类型有）
+  "file_name": "",          # 文件名（下载响应返回）
+  "attachments": [],        # 已下载到本地的附件 [{kind, name, path}]，path 为仓库相对路径
   "received_at": 1729000000.0,
   "status": "new",             # new -> done
   "reply": "",                 # Muse 处理完可回填（可选）
@@ -116,6 +120,10 @@ def append(path: str | Path, message: dict) -> bool:
         "open_id": message.get("open_id", ""),
         "msg_type": message.get("msg_type", ""),
         "text": message.get("text", ""),
+        "image_key": message.get("image_key", ""),
+        "file_key": message.get("file_key", ""),
+        "file_name": message.get("file_name", ""),
+        "attachments": message.get("attachments", []),
         "received_at": time.time(),
         "status": "new",
         "reply": "",
@@ -131,6 +139,23 @@ def append(path: str | Path, message: dict) -> bool:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         f.flush()
     return True
+
+
+def exists(path: str | Path, message_id: str) -> bool:
+    """收件箱里是否已有该 message_id（任何 status）。共享锁读，用于下载附件前
+    的预去重，避免重连补拉时重复下载已收过的图片/文件。"""
+    path = Path(path)
+    try:
+        with _locked(path, "r", exclusive=False) as f:
+            for line in _read_lines(f):
+                try:
+                    if json.loads(line).get("message_id") == message_id:
+                        return True
+                except json.JSONDecodeError:
+                    continue
+            return False
+    except FileNotFoundError:
+        return False
 
 
 def list_new(path: str | Path) -> list[dict]:
