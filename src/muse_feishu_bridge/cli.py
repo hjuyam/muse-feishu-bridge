@@ -5,6 +5,7 @@
     python -m muse_feishu_bridge.cli send --chat oc_xxx --text "你好"
     python -m muse_feishu_bridge.cli history         # 查看收件箱未处理消息
     python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get
+    python -m muse_feishu_bridge.cli react-batch om_a om_b [--emoji Get]
     python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx
 """
 from __future__ import annotations
@@ -167,6 +168,27 @@ def cmd_react(args) -> int:
     return 0
 
 
+def cmd_react_batch(args) -> int:
+    """批量加表情：一个进程内复用同一个客户端，分摊 ~16s 冷启动。
+
+    stdout 逐行打印 TSV `message_id\\treaction_id`（只含成功的）；失败条目打
+    到 stderr。整体恒 exit 0——部分失败不阻断上游（上游按 stdout 决定回填，
+    失败的留给 worker 兜底 react）。
+    """
+    from .feishu_client import FeishuBridge
+
+    cfg = load_config(args.config)
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message=lambda m: None)
+    for mid in args.message_ids:
+        try:
+            rid = bridge.add_reaction(mid, args.emoji)
+        except Exception as e:  # noqa: BLE001 -- 单条失败不影响其他
+            print(f"react 失败 {mid}: {e}", file=sys.stderr, flush=True)
+            continue
+        print(f"{mid}\t{rid}", flush=True)
+    return 0
+
+
 def cmd_unreact(args) -> int:
     from .feishu_client import FeishuBridge
 
@@ -204,6 +226,9 @@ def main(argv=None) -> int:
     r = sub.add_parser("react", help="给一条消息加表情反馈（Get=已收到，DONE=处理完）")
     r.add_argument("--message-id", required=True, help="飞书 message_id，如 om_xxx")
     r.add_argument("--emoji", default="Get", help="表情类型，默认 Get（已收到），大小写敏感")
+    rb = sub.add_parser("react-batch", help="批量加表情（一次进程复用客户端，分摊冷启动）")
+    rb.add_argument("message_ids", nargs="+", help="飞书 message_id 列表，如 om_a om_b")
+    rb.add_argument("--emoji", default="Get", help="表情类型，默认 Get（已收到），大小写敏感")
     u = sub.add_parser("unreact", help="删除之前加的表情反馈")
     u.add_argument("--message-id", required=True)
     u.add_argument("--reaction-id", required=True)
@@ -211,6 +236,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     return {"doctor": cmd_doctor, "listen": cmd_listen,
             "send": cmd_send, "react": cmd_react,
+            "react-batch": cmd_react_batch,
             "unreact": cmd_unreact, "history": cmd_history}[args.cmd](args)
 
 
