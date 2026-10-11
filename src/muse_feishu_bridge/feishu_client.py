@@ -43,16 +43,23 @@ def _get(obj, *attrs, default=""):
 def _post_to_text(post: dict) -> str:
     """把飞书富文本(post)转成纯文本：标题 + 各段落。
 
+    兼容两种来源的格式（2026-10-12 实测：两者结构不一样）：
+    - 事件推送：{"post": {"zh_cn": {"title":..., "content": [...]}}}
+    - 历史 API：直接就是 {"title":..., "content": [...]}，无 post 包裹、无 locale
     文本/超链接保留文字，@ 保留被 @ 对象，图片记为 [图片]，
     其他元素（分割线等）忽略。locale 优先 zh_cn，其次 en_us。
     """
     if not isinstance(post, dict):
         return ""
+    if isinstance(post.get("post"), dict):
+        post = post["post"]  # 事件推送格式：先解一层 post
     block = None
     for locale in ("zh_cn", "en_us"):
         if isinstance(post.get(locale), dict):
             block = post[locale]
             break
+    if block is None and isinstance(post.get("content"), list):
+        block = post  # 历史 API 格式：本身就是 block
     if block is None:
         for v in post.values():
             if isinstance(v, dict):
@@ -97,7 +104,7 @@ def _extract_content(msg_type: str, raw_content: str) -> dict:
     if msg_type == "text":
         out["text"] = content.get("text", "") or ""
     elif msg_type == "post":
-        out["text"] = _post_to_text(content.get("post") or {})
+        out["text"] = _post_to_text(content)  # _post_to_text 内部兼容事件/历史两种格式
     elif msg_type == "image":
         out["image_key"] = content.get("image_key", "") or ""
     elif msg_type == "file":
