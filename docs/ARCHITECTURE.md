@@ -2,7 +2,7 @@
 
 ## 一句话
 
-智能在 Muse 那一侧，本仓库只做传输：**飞书长连接收消息 → JSONL 收件箱 → Muse 轮询处理 → 飞书 API 回消息**。
+智能在 Muse 那一侧，本仓库只做传输：**飞书长连接收消息 → JSONL 收件箱 → hook 检测到新消息才唤醒 Muse → 飞书 API 回消息**。
 
 ```
 飞书用户 ──私聊/@──▶ 自建应用(机器人)
@@ -11,8 +11,10 @@
                     cli listen（本仓库）
                            │  append → data/inbox.jsonl
                            ▼
-                    Muse 轮询收件箱（poll_interval_sec）
-                           │  理解 / 执行任务
+                    hook 脚本每 30s 扫收件箱（被动，无消息时零开销）
+                           │  有新消息才 wake Muse
+                           ▼
+                    Muse 理解 / 执行任务
                            ▼
                     cli send ──▶ 飞书 API ──▶ 用户收到回复
 ```
@@ -25,8 +27,8 @@
 |--------------------|----------------------------------|-------------------------------------|
 | 例子               | Claude Code / Codex 接飞书       | 微信版 wechat-bridge、本项目        |
 | 前提               | agent 是本地 CLI，有 stdio/ACP   | agent 是云端服务，无公开调用入口    |
-| 消息流             | 桥进程每条消息 spawn 一次 CLI    | agent 自己跑循环，轮询 + 处理 + 回  |
-| 延迟特点           | 低（事件驱动）                   | 取决于轮询间隔（默认 20s）          |
+| 消息流             | 桥进程每条消息 spawn 一次 CLI    | 有飞书消息才唤醒 agent，处理 + 回    |
+| 延迟特点           | 低（事件驱动）                   | 取决于 hook 检测间隔（默认 30s），无消息时零开销 |
 
 Meta 个人助理 Muse 目前没有公开的"发一条消息、调一次"的 API/CLI（官方消息通道只有 WhatsApp），
 所以本项目只能走右列：Muse 自己托管桥接循环。这也是微信版 wechat-bridge 的路子——
@@ -52,4 +54,5 @@ Muse 侧约定：
 - 凭证只走 `config.yaml` / 环境变量，`.gitignore` 已排除。
 - `allow_open_ids` 白名单：默认只处理你自己的消息，防止陌生人使唤你的 Muse。
 - 飞书应用最小权限：`im:message`（发）+ `im.message.receive_v1`（收）。
-- 长连接不断线重连由 SDK 内部处理；Muse 侧建议用 cron / 常驻任务保活 `listen`。
+- 长连接断线重连由 SDK 内部处理；Muse 侧用 hook 脚本兼做保活：每 30 秒检查 `listen`
+  进程，掉了自动拉起（`scripts/run_listen.sh`），重启失败才唤醒 Muse 人工介入。
