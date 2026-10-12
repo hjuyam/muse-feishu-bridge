@@ -44,15 +44,13 @@ Muse 处理一条消息时，会在消息上打表情给用户即时反馈（体
 
 1. **扫到新消息**：轮询脚本（`hooks/feishu-inbox-watch.sh`）发现 `status=new` 的消息后、唤醒 worker 之前，立即经 `react-batch` 给消息加 `Get` 表情（"已收到"），并把返回的 `reaction_id` 原子写回收件箱记录——不等 worker 冷启动（几分钟），用户 30 秒内就能看到反馈；
 2. **worker 处理时**：若收件箱记录已有 `reaction_id` 则跳过自加 `Get`，直接沿用（避免重复加）；若无记录则 worker 自己加（兜底）；
-3. **处理完并发送回复后**：删掉 `Get`，换上 `DONE`（"处理完"）——
-   `python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx`，再
-   `python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji DONE`。
+3. **处理完并发送回复后**：`cli send --inbox-message-id om_xxx` 在发件队列确认"已发送"后自动完成闭环——删掉 `Get`、换上 `DONE`（"处理完"），再标 done（reply 里带飞书返回的 `message_id` 作发送凭证）。表情步骤失败不阻塞 done。
 
 注意：`emoji_type` 大小写敏感，官方枚举是 `Get`（不是 `GET`）和 `DONE`（全大写），写错会报 `231001 reaction type is invalid`。hook 的 worker 指令（`hooks/feishu-inbox-watch.json` 的 prompt）里已固定这套流程。
 
 ### 长任务进度播报
 
-短任务（2 分钟内）保持静默，Get → DONE 即可。长任务会自动播报进度，减少"黑盒焦虑"：
+短任务（2 分钟内）保持静默，Get → DONE 即可。长任务会自动播报进度，减少"黑盒焦虑"，走 `cli enqueue --kind progress`（写发件队列即返，不阻塞）：
 - 开始时发一条"收到，开始处理"（含步骤概览）
 - 每个有意义的里程碑完成时发一句话更新（人话版，非内部 todo 原文）
 - 5 分钟无进展时发心跳说明卡在哪

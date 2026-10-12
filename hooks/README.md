@@ -38,7 +38,8 @@
 
 1. `{"event":"new_messages","message_ids":[...]}` —— 处理收件箱里的新消息并回飞书。
    worker 对每条消息还要做表情反馈：开始处理前加 `Get` 表情（已收到），
-   处理完并回复成功后删掉 `Get`、换上 `DONE`（处理完）。命令见主 README。
+   处理完并经发件队列确认"已发送"后删掉 `Get`、换上 `DONE`（处理完）——
+   `cli send --inbox-message-id om_xxx` 会在确认后自动完成这一步。命令见主 README。
 2. `{"event":"listen_restart_failed"}` —— listen 进程掉了且脚本重启失败，需要人工介入
 
 ## 重建（VM 重置后）

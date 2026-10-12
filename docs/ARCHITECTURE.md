@@ -44,10 +44,12 @@ Muse 侧约定：
 
 1. `list_new()` 取出未处理消息；
 2. 逐条处理（理解意图、执行任务）；
-3. 用 `cli send --chat <chat_id> --text ...` 回复；
-4. `mark_done(message_id, reply=...)` 标记，避免重复处理。
+3. 用 `cli send --chat <chat_id> --text ... --inbox-message-id <message_id>` 回复——
+   发信走异步队列：入队即返、发送循环确认"已发送"后自动做 Get→DONE 表情切换并标 done；
+4. 发送确认失败（超时/报错）则不标 done，条目留在队列继续重试，下次唤醒再闭环。
 
-去重键是飞书 `message_id`，`listen` 写入时已做过去重；Muse 重启后从收件箱继续即可。
+去重键是飞书 `message_id`，`listen` 写入时已做过去重；发件队列按 `inbox_message_id` 幂等，
+worker 重复调用 `cli send` 不会发出两条；Muse 重启后从收件箱继续即可。
 
 ## 可靠性
 
