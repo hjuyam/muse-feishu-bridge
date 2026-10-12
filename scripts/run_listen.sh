@@ -11,6 +11,13 @@ export PYTHONPATH=src
 crashes=0
 while true; do
   start=$(date +%s)
+  # 单实例兜底：若已有 listen 在跑（比如看门狗刚拉起过、或残留了第二个
+  # run_listen.sh 循环），直接等一轮，不重复拉起。真正的互斥由 cli listen
+  # 启动时的 data/listen.lock 保证，这里只是减少无谓重启。
+  if pgrep -f "[m]use_feishu_bridge[.]cli listen" >/dev/null 2>&1; then
+    sleep 60
+    continue
+  fi
   .venv/bin/python -m muse_feishu_bridge.cli listen >> data/listen.log 2>&1
   rc=$?
   echo "$(date -u +%FT%TZ) run_listen: listen 进程退出（rc=$rc），准备重拉" >> data/listen.log

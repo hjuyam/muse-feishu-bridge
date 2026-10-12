@@ -66,6 +66,12 @@ worker 重复调用 `cli send` 不会发出两条；Muse 重启后从收件箱�
   收件箱（幂等）。已知会话来自收件箱历史里的 `chat_id`。
 - **收件箱并发**：`listen`（append）与 worker（mark_done 全文件重写）是两个进程，
   `inbox.py` 所有读写经 `fcntl.flock` 加锁（写排他、读共享），杜绝重写撕裂丢消息。
+- **发件双保险**：① listen 单实例锁（`data/listen.lock` 非阻塞 flock，第二个
+  实例直接退出；2026-10-12 曾因 run_listen.sh 自重启与看门狗 cron 在重启窗口期
+  竞态拉起双进程，导致同一队列条目被发两次）；② 发件队列原子认领：发送前先
+  `claim_due` 在排他锁下把条目置为 `sending` 并写下认领者，`mark_sent` /
+  `mark_retry` 只认自己名下的认领，认领超 600 秒未完成视为发送者已死、可被回收。
+  即使双发送者并存，同一条目也只会被发出一次。
 
 ## 安全边界
 

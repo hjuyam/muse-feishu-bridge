@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -93,30 +94,44 @@ def _backfill_recent(cfg, known_chats: set[str], on_message) -> None:
 
 
 def _sender_pass(cfg, bridge) -> tuple[int, int]:
-    """发送循环的一次扫描：按入队顺序逐条发出到期的队列条目。
+    """发送循环的一次扫描：认领到期的队列条目并逐条发出。
 
-    返回 (成功数, 失败数)。某条失败只推迟它自己的下次重试（指数退避，
-    上限 30 分钟），不阻塞后面的条目。发送线程只负责 HTTP 发出 + 回填
-    发送凭证；Get→DONE 表情切换与 inbox 标 done 由 cli send 的等待端
-    （或下一次 worker 唤醒）完成，保证"确认发送成功才 done"的硬约束。
+    双发送者防护：先 claim_due 原子认领（排他锁下置为 sending），再发 HTTP；
+    没抢到认领的条目直接跳过——即使有两个 listen 进程并存，同一条目也只会
+    被一个发送者发出（2026-10-12 曾因此重复发信，已修）。返回 (成功数, 失败数)。
+    某条失败只推迟它自己的下次重试（指数退避，上限 30 分钟），不阻塞后面的条目。
+    发送线程只负责 HTTP 发出 + 回填发送凭证；Get→DONE 表情切换与 inbox 标 done
+    由 cli send 的等待端（或下一次 worker 唤醒）完成，保证"确认发送成功才 done"
+    的硬约束。
     """
     from pathlib import Path
 
     outbox_path = Path(cfg.bridge.inbox_path).parent / "outbox.jsonl"
+    owner = f"sender-{os.getpid()}"
     sent_ok = sent_fail = 0
-    for entry in outbox.list_due(outbox_path):
-        qid = entry.get("queue_id", "")
-        try:
-            mid = bridge.send_text(entry["chat_id"], entry["text"])
-        except Exception as e:  # noqa: BLE001 -- 单条失败不影响其他条目
-            outbox.mark_retry(outbox_path, qid, str(e))
-            sent_fail += 1
-            print(f"outbox 发送失败 {qid}（{entry.get('attempts', 0)}+1 次），"
-                  f"已推迟重试: {e}")
-            continue
-        outbox.mark_sent(outbox_path, qid, mid)
-        sent_ok += 1
-        print(f"outbox 已发送 {qid} → 飞书 message_id={mid}")
+    while True:
+        entries = outbox.claim_due(outbox_path, owner)
+        if not entries:
+            break
+        for entry in entries:
+            qid = entry.get("queue_id", "")
+            try:
+                mid = bridge.send_text(entry["chat_id"], entry["text"])
+            except Exception as e:  # noqa: BLE001 -- 单条失败不影响其他条目
+                outbox.mark_retry(outbox_path, qid, str(e), owner)
+                sent_fail += 1
+                print(f"outbox 发送失败 {qid}（{entry.get('attempts', 0)}+1 次），"
+                      f"已推迟重试: {e}")
+                continue
+            if outbox.mark_sent(outbox_path, qid, mid, owner):
+                sent_ok += 1
+                print(f"outbox 已发送 {qid} → 飞书 message_id={mid}")
+            else:
+                # 认领在 HTTP 发送期间过期被回收：对方可能已重发，本条以告警
+                # 记录，不静默吞掉。
+                sent_fail += 1
+                print(f"outbox {qid} 已发出（飞书 message_id={mid}）但认领已失效，"
+                      f"回填失败，请人工核查是否重复发送")
     return sent_ok, sent_fail
 
 
@@ -132,6 +147,37 @@ def _sender_loop(cfg, bridge, interval: float = 5.0) -> None:
         time.sleep(interval)
 
 
+_listen_lock_fh = None  # 单实例锁的文件句柄，进程存活期间一直持有
+
+
+def _acquire_listen_lock(data_dir) -> bool:
+    """抢 listen 单实例锁（data/listen.lock，非阻塞排他 flock）。
+
+    2026-10-12 实测：run_listen.sh 的 10 秒自重启与看门狗 cron 在重启窗口期
+    竞态，曾同时拉起两个 listen 进程，各自的发送线程把同一条队列消息发了两次。
+    有锁在，第二个实例直接退出——无论谁拉起的。锁随进程死亡自动释放，
+    不影响看门狗的正常重启。
+    """
+    global _listen_lock_fh
+    from pathlib import Path
+    try:
+        import fcntl
+    except ImportError:
+        return True  # 非 Linux 退化：不加锁
+    lock_path = Path(data_dir) / "listen.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    fh.write(str(os.getpid()))
+    fh.flush()
+    _listen_lock_fh = fh  # 持有到进程结束
+    return True
+
+
 def cmd_listen(args) -> int:
     from pathlib import Path
 
@@ -140,6 +186,10 @@ def cmd_listen(args) -> int:
     import threading
 
     cfg = load_config(args.config)
+    data_dir = Path(cfg.bridge.inbox_path).parent
+    if not _acquire_listen_lock(data_dir):
+        print("另一个 listen 实例正在运行，本实例直接退出（避免双进程重复发信）")
+        return 0
     allow = set(cfg.bridge.allow_open_ids or [])
     known_chats = _load_known_chats(cfg.bridge.inbox_path)
     chats_lock = threading.Lock()  # on_message 跑在 SDK 事件线程，加锁保护 known_chats
