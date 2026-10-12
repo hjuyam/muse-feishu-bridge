@@ -80,3 +80,9 @@ worker 重复调用 `cli send` 不会发出两条；Muse 重启后从收件箱�
 - 飞书应用最小权限：`im:message`（发）+ `im.message.receive_v1`（收）。
 - 长连接断线重连由 SDK 内部处理；Muse 侧用 hook 脚本兼做保活：每 30 秒检查 `listen`
   进程，掉了自动拉起（`scripts/run_listen.sh`），重启失败才唤醒 Muse 人工介入。
+
+## 消息处理时序图
+
+![消息处理时序图](images/sequence.png)
+
+mermaid 源码：[sequence.mmd](sequence.mmd)

@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant F as 飞书平台
+    participant L as cli listen（长连接常驻进程）
+    participant I as 收件箱 data/inbox.jsonl
+    participant H as hook 轮询脚本（每 30s）
+    participant W as Muse worker
+    participant Q as 发件队列 data/outbox.jsonl
+
+    U->>F: 发送消息（文本/图片/文件…）
+    F->>L: im.message.receive_v1 推送
+    L->>F: 加 Get 表情（1~2 秒内）
+    L->>I: append 入收件箱（去重 + 回填 reaction_id）
+    H-->>I: 每 30s 扫描 status=new
+    H->>W: 有新消息才 wake
+    W-->>I: 读 new 消息（同会话聚合 + drain）
+    W->>W: Muse 理解 / 执行任务
+    W->>Q: enqueue reply（按 inbox_message_id 幂等去重）
+    L-->>Q: 发送线程取条目（原子认领）
+    L->>F: 发出消息，确认 message_id
+    L->>F: 删 Get、加 DONE
+    L->>I: 标 done（带飞书 message_id 凭证）
+
+    Note over W,Q: 长任务进度播报也走发件队列（kind=progress），5s 内发出，不触发 done
+    Note over L,H: 保活三层：listen 内部断线重连（5s→300s 指数退避）→ run_listen.sh 进程退出 10s 重拉 → cron 看门狗每 2 分钟兜底；每次重连前补拉最近 50 条历史、按 message_id 去重写入
