@@ -4,28 +4,32 @@
 
 ---
 
-我clone 了 `muse-feishu-bridge` 仓库（目录：`./muse-feishu-bridge`），请帮我把飞书接入你，
-跑起来并保持在线。按以下步骤做，遇到问题停下来问我：
+用这个仓库（`https://github.com/hjuyam/muse-feishu-bridge.git`）把飞书接入你，
+跑起来并保持在线。
 
-1. **读文档**：先读仓库里的 `README.md`、`docs/SETUP.md`、`docs/ARCHITECTURE.md`，
+原则：代码和配置能搞定的全部你自己动手，**不要让我手工 clone / 装依赖 / 敲命令**；
+只在需要我的身份（飞书账号登录、控制台点击、密钥）时停下来问我。
+
+1. **拉仓库**：`git clone` 到 `./muse-feishu-bridge`，后面所有步骤都在该目录下。
+2. **读文档**：先读仓库里的 `README.md`、`docs/SETUP.md`、`docs/ARCHITECTURE.md`，
    理解"agent 驱动桥"的架构：你负责轮询收件箱、处理消息、发回飞书。
-2. **装依赖**：`bash scripts/install.sh`（需要 Python 3.10+）。
-3. **配凭证**：`cp config.example.yaml config.yaml`，然后问我要飞书应用的 `app_id` /
+3. **装依赖**：`bash scripts/install.sh`（需要 Python 3.10+）。
+4. **配凭证**：`cp config.example.yaml config.yaml`，然后问我要飞书应用的 `app_id` /
    `app_secret`（我来提供，不要自己编）。把我的飞书 `open_id` 加进
    `allow_open_ids` 白名单。
-4. **自检**：跑 `PYTHONPATH=src .venv/bin/python -m muse_feishu_bridge.cli doctor`，
+5. **自检**：跑 `PYTHONPATH=src .venv/bin/python -m muse_feishu_bridge.cli doctor`，
    确认通过。
-5. **联调**：后台启动 `listen`（`nohup` 或等价方式，日志落到文件），然后让我在飞书里
+6. **联调**：后台启动 `listen`（`nohup` 或等价方式，日志落到文件），然后让我在飞书里
    给机器人发一条测试消息，确认 `data/inbox.jsonl` 出现记录；再用 `send` 命令给我回
    一条，确认我能收到。
-6. **接管循环（被动唤醒）**：双向通了之后，建立一个事件驱动的唤醒机制（推荐 hook：
+7. **接管循环（被动唤醒）**：双向通了之后，建立一个事件驱动的唤醒机制（推荐 hook：
    一个轻量脚本每 30 秒扫 `data/inbox.jsonl`，有 `status=new` 的消息才唤醒你，无消息时
    零开销；不要用固定间隔的 cron 空轮询）。被唤醒后流程：逐条理解并执行（能用你的
    全部能力：上网、跑代码、查资料等）→ `send` 回复到对应 `chat_id` → 标记 done。
    注意：只处理白名单用户的消息；执行高风险操作前先在回复里跟我确认。
-7. **保活**：`listen` 进程掉了要能自己拉起来（三层：listen 内部断线重连 →
+8. **保活**：`listen` 进程掉了要能自己拉起来（三层：listen 内部断线重连 →
    `scripts/run_listen.sh` 进程退出自重启 → cron 看门狗每 2 分钟外部兜底；
    hook 脚本和被唤醒的 worker 只做存活检测与告警，不拉起常驻进程）。
    保活链拉不起来才向我报告。
 
-开始吧，先从第 1 步读文档起。
+开始吧，先从第 1 步拉仓库起。

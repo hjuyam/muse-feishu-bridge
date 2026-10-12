@@ -24,7 +24,7 @@
 | 1 | 飞书开放平台创建企业自建应用 | 👤 你手工 | 需要用你的飞书账号登录 [open.feishu.cn](https://open.feishu.cn)，Agent 没有你的身份，做不了。步骤见 [docs/SETUP.md](docs/SETUP.md) 第 1 步 |
 | 2 | 开通机器人能力、订阅 `im.message.receive_v1` 事件、发布版本 | 👤 你手工 | 控制台点击 + 企业管理员审批权限，Agent 做不了。见 [docs/SETUP.md](docs/SETUP.md) 第 2 步 |
 | 3 | 填 `config.yaml`（app_id / app_secret / 白名单） | 👤 你提供密钥 | 密钥经你和 Muse 的 **1v1 聊天**发给 Muse（不要发到群聊里），由 Muse 直接代填进 `config.yaml`；介意的话也可以自己手工填 |
-| 4 | 装依赖、`doctor` 自检、联调 `listen` / `send` 双向收发 | 🤖 Muse 代办 | `bash scripts/install.sh` → `cli doctor` → 终端起 listen 验证。见 [docs/SETUP.md](docs/SETUP.md) 第 4–5 步 |
+| 4 | 拉仓库、装依赖、`doctor` 自检、联调 `listen` / `send` 双向收发 | 🤖 Muse 代办 | Muse 先 `git clone` 拉仓库，然后 `bash scripts/install.sh` → `cli doctor` → 终端起 listen 验证。见 [docs/SETUP.md](docs/SETUP.md) 第 4–5 步 |
 | 5 | 把机器人加为好友（或拉进群），发第一条消息 | 👤 你手工 | 飞书客户端操作；第一条消息会产生 `chat_id`，之后 Muse 才能回你 |
 | 6 | 注册事件触发器（30 秒轮询 + listen 存活检测 + 唤醒 worker） | 🤖 Muse 代办 | 模板在 [hooks/](hooks/)：Muse 按你的运行时改好 `delivery` 占位符并注册，之后有新消息才唤醒、无消息零开销 |
 | 7 | VM 重启 / 重置后的恢复 | 🤖 自动 + Muse 代办 | 重启：`config.yaml` 都在磁盘上，cron 看门狗检测到 listen 掉了自动拉起；重置：按 [docs/RECOVERY.md](docs/RECOVERY.md) 重建（密钥需你重新提供） |
@@ -49,7 +49,7 @@ Muse 在你的消息上打表情给你实时进度（尽力而为，失败不阻
 
 ![消息收发时序图](docs/images/sequence.png)
 
-图源码：[docs/sequence.mmd](docs/sequence.mmd)（mermaid，想改自己渲染）。
+源文件：[docs/sequence.mmd](docs/sequence.mmd)。
 
 ## 支持的消息类型
 
@@ -64,20 +64,13 @@ Muse 在你的消息上打表情给你实时进度（尽力而为，失败不阻
 
 ## 快速开始
 
-```bash
-git clone https://github.com/hjuyam/muse-feishu-bridge.git
-cd muse-feishu-bridge
-bash scripts/install.sh
-cp config.example.yaml config.yaml   # 填入飞书应用的 app_id / app_secret
-```
-
-然后去 [飞书开放平台](https://open.feishu.cn) 创建一个企业自建应用并开通机器人能力，步骤见 [docs/SETUP.md](docs/SETUP.md)。
-
-接着把 [docs/MUSE_BRIEF.md](docs/MUSE_BRIEF.md) 整段粘贴给 Muse，一句话：
+把 [docs/MUSE_BRIEF.md](docs/MUSE_BRIEF.md) 整段粘贴给 Muse，一句话：
 
 > 帮我用这个仓库把飞书接入你，跑起来并保持在线。
 
-Muse 会自己完成：启动长连接监听 → 轮询收件箱 → 处理消息 → 回飞书。
+Muse 会自己完成：拉仓库 → 装依赖 → 配凭证（密钥找你要）→ 联调收发 → 注册触发器 → 保活在线。**你什么都不用装、不用敲命令。**
+
+唯一要你手工做的：去 [飞书开放平台](https://open.feishu.cn) 创建一个企业自建应用并开通机器人能力（步骤见 [docs/SETUP.md](docs/SETUP.md)）——那一步需要你的飞书账号登录，Muse 代不了。
 
 ## 目录结构
 
