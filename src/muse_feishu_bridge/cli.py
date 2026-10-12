@@ -3,6 +3,9 @@
     python -m muse_feishu_bridge.cli doctor          # 只检查配置与依赖，不联网
     python -m muse_feishu_bridge.cli listen          # 长连接收消息 → 写收件箱（阻塞）
     python -m muse_feishu_bridge.cli send --chat oc_xxx --text "你好"
+    python -m muse_feishu_bridge.cli send --chat oc_xxx --text "你好" --inbox-message-id om_xxx
+    python -m muse_feishu_bridge.cli enqueue --chat oc_xxx --text "处理中…" [--kind progress]
+    python -m muse_feishu_bridge.cli flush            # 手动跑一次发件队列
     python -m muse_feishu_bridge.cli history         # 查看收件箱未处理消息
     python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get
     python -m muse_feishu_bridge.cli react-batch om_a om_b [--emoji Get]
@@ -16,6 +19,7 @@ import sys
 
 from . import __version__
 from . import inbox
+from . import outbox
 from .config import load_config
 
 
@@ -87,6 +91,46 @@ def _backfill_recent(cfg, known_chats: set[str], on_message) -> None:
             print(f"历史补拉 {chat_id}: 找回 {added} 条断线期间的消息")
 
 
+def _sender_pass(cfg, bridge) -> tuple[int, int]:
+    """发送循环的一次扫描：按入队顺序逐条发出到期的队列条目。
+
+    返回 (成功数, 失败数)。某条失败只推迟它自己的下次重试（指数退避，
+    上限 30 分钟），不阻塞后面的条目。发送线程只负责 HTTP 发出 + 回填
+    发送凭证；Get→DONE 表情切换与 inbox 标 done 由 cli send 的等待端
+    （或下一次 worker 唤醒）完成，保证"确认发送成功才 done"的硬约束。
+    """
+    from pathlib import Path
+
+    outbox_path = Path(cfg.bridge.inbox_path).parent / "outbox.jsonl"
+    sent_ok = sent_fail = 0
+    for entry in outbox.list_due(outbox_path):
+        qid = entry.get("queue_id", "")
+        try:
+            mid = bridge.send_text(entry["chat_id"], entry["text"])
+        except Exception as e:  # noqa: BLE001 -- 单条失败不影响其他条目
+            outbox.mark_retry(outbox_path, qid, str(e))
+            sent_fail += 1
+            print(f"outbox 发送失败 {qid}（{entry.get('attempts', 0)}+1 次），"
+                  f"已推迟重试: {e}")
+            continue
+        outbox.mark_sent(outbox_path, qid, mid)
+        sent_ok += 1
+        print(f"outbox 已发送 {qid} → 飞书 message_id={mid}")
+    return sent_ok, sent_fail
+
+
+def _sender_loop(cfg, bridge, interval: float = 5.0) -> None:
+    """发送循环：常驻线程，每 interval 秒扫一次发件队列。"""
+    import time
+
+    while True:
+        try:
+            _sender_pass(cfg, bridge)
+        except Exception as e:  # noqa: BLE001 -- 发送循环绝不能死
+            print(f"发送循环异常，已跳过本轮: {e}")
+        time.sleep(interval)
+
+
 def cmd_listen(args) -> int:
     from pathlib import Path
 
@@ -102,6 +146,15 @@ def cmd_listen(args) -> int:
     # 附件下载专用桥（只做 HTTP，不建长连接；FeishuBridge 构造本身不联网）
     media_bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
                                 on_message=lambda m: None)
+    # 发件队列发送循环：worker 只写队列，由这个常驻线程顺序发出、
+    # 失败单独退避重试。listen 进程由看门狗保活，队列文件落盘持久化，
+    # 进程重启不丢任务。
+    sender_bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
+                                 on_message=lambda m: None)
+    sender_thread = threading.Thread(target=_sender_loop,
+                                     args=(cfg, sender_bridge),
+                                     name="outbox-sender", daemon=True)
+    sender_thread.start()
 
     def _save_attachment(msg: dict) -> None:
         """下载图片/文件附件落盘 data/attachments/<message_id>/，回填 msg。
@@ -194,12 +247,84 @@ def cmd_listen(args) -> int:
 
 
 def cmd_send(args) -> int:
+    """发一条文本消息（发信异步化后的入口，语义保持兼容）。
+
+    流程：写发件队列（kind=reply，幂等去重）→ 等待发送循环确认发出 →
+    拿到飞书 message_id 后做 Get→DONE 表情切换 + inbox 标 done →
+    打印"已发送，message_id="。超时或失败则 exit 1，绝不标 done，
+    条目留在队列里由发送循环继续重试，下次 worker 唤醒可重新闭环。
+    """
+    import time
+    from pathlib import Path
+
     from .feishu_client import FeishuBridge
 
     cfg = load_config(args.config)
-    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message=lambda m: None)
-    mid = bridge.send_text(args.chat, args.text)
+    outbox_path = Path(cfg.bridge.inbox_path).parent / "outbox.jsonl"
+    queue_id, is_new = outbox.enqueue(
+        outbox_path, args.chat, args.text,
+        kind="reply", inbox_message_id=args.inbox_message_id or "")
+    if not is_new:
+        print(f"队列已存在同条目（幂等复用），queue_id={queue_id}")
+
+    deadline = time.time() + args.timeout
+    entry = None
+    while time.time() < deadline:
+        entry = outbox.get(outbox_path, queue_id)
+        if entry and entry.get("status") == "sent":
+            break
+        time.sleep(2)
+        entry = None
+    if not entry or entry.get("status") != "sent":
+        print(f"发送超时（{args.timeout}s），条目 {queue_id} 仍在队列中稍后重试，"
+              f"未标 done", file=sys.stderr)
+        return 1
+
+    mid = entry.get("sent_message_id", "")
+    # DONE 闭环：只有飞书确认"已发送"之后，才换表情、标 done。
+    if args.inbox_message_id:
+        bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
+                              on_message=lambda m: None)
+        record = inbox.get(cfg.bridge.inbox_path, args.inbox_message_id) or {}
+        rid = record.get("reaction_id") or ""
+        if rid:
+            try:
+                bridge.remove_reaction(args.inbox_message_id, rid)
+            except Exception as e:  # noqa: BLE001 -- 表情失败不影响 done
+                print(f"删除 Get 表情失败（不影响 done）: {e}")
+        try:
+            bridge.add_reaction(args.inbox_message_id, "DONE")
+        except Exception as e:  # noqa: BLE001
+            print(f"加 DONE 表情失败（不影响 done）: {e}")
+        summary = args.text[:40].replace("\n", " ")
+        inbox.mark_done(cfg.bridge.inbox_path, args.inbox_message_id,
+                        f"已发送 {mid}：{summary}")
     print(f"已发送，message_id={mid}")
+    return 0
+
+
+def cmd_enqueue(args) -> int:
+    """只写发件队列、立即返回（进度播报用，不阻塞、不触发 done）。"""
+    from pathlib import Path
+
+    cfg = load_config(args.config)
+    outbox_path = Path(cfg.bridge.inbox_path).parent / "outbox.jsonl"
+    queue_id, is_new = outbox.enqueue(
+        outbox_path, args.chat, args.text,
+        kind=args.kind, inbox_message_id=args.inbox_message_id or "")
+    print(f"已入队，queue_id={queue_id}{'（幂等复用）' if not is_new else ''}")
+    return 0
+
+
+def cmd_flush(args) -> int:
+    """手动跑一次发送循环（调试/兜底用，listen 里的常驻线程平时会自动跑）。"""
+    from .feishu_client import FeishuBridge
+
+    cfg = load_config(args.config)
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret,
+                          on_message=lambda m: None)
+    ok, fail = _sender_pass(cfg, bridge)
+    print(f"flush 完成：成功 {ok} 条，失败 {fail} 条")
     return 0
 
 
@@ -269,9 +394,21 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor", help="检查配置与依赖（不联网）")
     sub.add_parser("listen", help="长连接收消息并写入收件箱")
-    s = sub.add_parser("send", help="发一条文本消息")
+    s = sub.add_parser("send", help="发一条文本消息（经发件队列，确认发出后才 done）")
     s.add_argument("--chat", required=True, help="chat_id，如 oc_xxx")
     s.add_argument("--text", required=True)
+    s.add_argument("--inbox-message-id", default="",
+                   help="对应的收件箱消息 id（om_xxx）：用于 Get→DONE 表情切换与标 done")
+    s.add_argument("--timeout", type=int, default=180,
+                   help="等待发送确认的最长秒数，默认 180")
+    e = sub.add_parser("enqueue", help="只写发件队列、立即返回（进度播报用，不阻塞）")
+    e.add_argument("--chat", required=True, help="chat_id，如 oc_xxx")
+    e.add_argument("--text", required=True)
+    e.add_argument("--kind", default="progress", choices=("reply", "progress"),
+                   help="reply=最终回复（发出后走 DONE 闭环），progress=进度播报（只管发）")
+    e.add_argument("--inbox-message-id", default="",
+                   help="kind=reply 时对应的收件箱消息 id，用于幂等去重与 DONE 闭环")
+    sub.add_parser("flush", help="手动跑一次发件队列发送（调试/兜底）")
     r = sub.add_parser("react", help="给一条消息加表情反馈（Get=已收到，DONE=处理完）")
     r.add_argument("--message-id", required=True, help="飞书 message_id，如 om_xxx")
     r.add_argument("--emoji", default="Get", help="表情类型，默认 Get（已收到），大小写敏感")
@@ -284,7 +421,8 @@ def main(argv=None) -> int:
     sub.add_parser("history", help="查看未处理消息")
     args = p.parse_args(argv)
     return {"doctor": cmd_doctor, "listen": cmd_listen,
-            "send": cmd_send, "react": cmd_react,
+            "send": cmd_send, "enqueue": cmd_enqueue, "flush": cmd_flush,
+            "react": cmd_react,
             "react-batch": cmd_react_batch,
             "unreact": cmd_unreact, "history": cmd_history}[args.cmd](args)
 

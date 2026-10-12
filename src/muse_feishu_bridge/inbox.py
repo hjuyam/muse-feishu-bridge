@@ -176,6 +176,23 @@ def list_new(path: str | Path) -> list[dict]:
         return []
 
 
+def get(path: str | Path, message_id: str) -> dict | None:
+    """按 message_id 取一条收件箱记录（共享锁），不存在返回 None。"""
+    path = Path(path)
+    try:
+        with _locked(path, "r", exclusive=False) as f:
+            for line in _read_lines(f):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("message_id") == message_id:
+                    return record
+    except FileNotFoundError:
+        return None
+    return None
+
+
 def set_reaction_id(path: str | Path, message_id: str, reaction_id: str) -> str | None:
     """排他锁下的原子 check-and-set：给 status=new 的记录回填 reaction_id。
 
