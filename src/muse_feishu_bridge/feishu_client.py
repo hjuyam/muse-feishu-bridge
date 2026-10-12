@@ -2,8 +2,11 @@
 
 - 收：WebSocket 长连接（无需公网 URL），收到「发给机器人的消息」事件后归一化，
   交给调用方（cli.listen 会写入收件箱）。入站支持文本 / 富文本(post) /
-  图片 / 文件；图片与文件附件可按 key 下载。
+  图片 / 文件 / 音频(audio) / 视频(media) / 合并转发(merge_forward)；
+  图片、文件、音频、视频附件可按 key 下载（后三者 content 均为 file_key 形态）。
 - 发：HTTP API 发文本消息回指定会话。
+- 引用：事件自带 parent_id（被引用/被回复消息的 message_id），
+  get_message 可按 id 取单条消息内容（被引用的原文）。
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from lark_oapi.api.im.v1 import (
     Emoji,
     GetFileRequest,
     GetImageRequest,
+    GetMessageRequest,
     ListMessageRequest,
     P2ImMessageReceiveV1,
 )
@@ -27,9 +31,16 @@ from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
 MessageHandler = Callable[[dict], None]
 
-# 入站支持的消息类型。超出此范围的（如语音/视频/表情包）由调用方明确记日志
+# 入站支持的消息类型。超出此范围的（如表情包）由调用方明确记日志
 # 跳过，不再静默丢弃——2026-10-11 前 post 消息曾被静默跳过导致用户"丢任务"。
-SUPPORTED_MSG_TYPES = ("text", "post", "image", "file")
+# 2026-10-12 扩展：audio（语音条；飞书官方无 voice 类型，语音消息即 audio）、
+# media/video（视频，content 为 file_key 形态，与 file 同一下载路子）、
+# merge_forward（合并转发的聊天记录卡片，content 为占位符，原文保留待展开）。
+SUPPORTED_MSG_TYPES = (
+    "text", "post", "image", "file",
+    "audio", "media", "video",
+    "merge_forward", "merged_forward",
+)
 
 
 def _get(obj, *attrs, default=""):
@@ -92,7 +103,10 @@ def _extract_content(msg_type: str, raw_content: str) -> dict:
     """按消息类型从 content JSON 里提取 text / image_key / file_key。
 
     text：content.text；post：转纯文本；image：image_key；
-    file：file_key（file_name 事件里通常没有，下载时再补）。
+    file/audio/media/video：file_key（file_name 事件里通常没有，下载时再补；
+    audio 即语音条，飞书官方无 voice 类型；media/video 为视频）；
+    merge_forward：合并转发的聊天记录卡片，content 为占位符，
+    这里只给占位文本，原文由调用方保留（raw_content）待展开。
     """
     try:
         content = json.loads(raw_content)
@@ -107,9 +121,11 @@ def _extract_content(msg_type: str, raw_content: str) -> dict:
         out["text"] = _post_to_text(content)  # _post_to_text 内部兼容事件/历史两种格式
     elif msg_type == "image":
         out["image_key"] = content.get("image_key", "") or ""
-    elif msg_type == "file":
+    elif msg_type in ("file", "audio", "media", "video"):
         out["file_key"] = content.get("file_key", "") or ""
         out["file_name"] = content.get("file_name", "") or ""
+    elif msg_type in ("merge_forward", "merged_forward"):
+        out["text"] = "[合并转发的聊天记录]"
     return out
 
 
@@ -140,14 +156,20 @@ class FeishuBridge:
 
     @staticmethod
     def _normalize(data: P2ImMessageReceiveV1) -> dict:
-        """把 SDK 事件转成 inbox.py 的消息格式（文本/富文本/图片/文件）。"""
+        """把 SDK 事件转成 inbox.py 的消息格式。
+
+        parent_id：引用/回复场景下被引用消息的 message_id（无引用时为空串），
+        worker 可凭它调 get_message 取被引用原文。
+        merge_forward 的 content 为占位符，原文 JSON 存 raw_content 供后续展开。
+        """
         event = _get(data, "event", default=None)
         msg = _get(event, "message", default=None)
         sender = _get(event, "sender", default=None)
         sender_id = _get(sender, "sender_id", default=None)
         msg_type = _get(msg, "message_type")
-        extracted = _extract_content(msg_type, _get(msg, "content", default="{}"))
-        return {
+        raw_content = _get(msg, "content", default="{}")
+        extracted = _extract_content(msg_type, raw_content)
+        record = {
             "message_id": _get(msg, "message_id"),
             "chat_id": _get(msg, "chat_id"),
             "chat_type": _get(msg, "chat_type"),
@@ -157,7 +179,11 @@ class FeishuBridge:
             "file_key": extracted["file_key"],
             "file_name": extracted["file_name"],
             "open_id": _get(sender_id, "open_id"),
+            "parent_id": _get(msg, "parent_id"),
         }
+        if msg_type in ("merge_forward", "merged_forward"):
+            record["raw_content"] = raw_content
+        return record
 
     def start_listening(self) -> None:
         """阻塞运行长连接。注意：SDK 在某些断线场景（如 no close frame）会直接返回，
@@ -192,6 +218,7 @@ class FeishuBridge:
             "file_key": extracted["file_key"],
             "file_name": extracted["file_name"],
             "open_id": open_id,
+            "parent_id": _get(item, "parent_id"),
         }
 
     def list_recent_messages(self, chat_id: str, page_size: int = 50) -> list[dict]:
@@ -213,6 +240,41 @@ class FeishuBridge:
         items = (resp.data.items or []) if resp.data else []
         # API 返回新→旧，反转为旧→新，方便按序写入收件箱
         return [self._normalize_history(it, chat_id) for it in reversed(items)]
+
+    def get_message(self, message_id: str) -> dict:
+        """按 message_id 取单条消息，返回归一化后的消息 dict（与 _normalize 同形）。
+
+        用途：引用/回复场景——事件只带 parent_id（被引用消息 id），
+        用这个接口把被引用的原文取回来拼进上下文。
+        失败抛 RuntimeError（含飞书 code/msg，缺权限时按 code 处理）。
+        """
+        request = (
+            GetMessageRequest.builder()
+            .message_id(message_id)
+            .build()
+        )
+        resp = self._client.im.v1.message.get(request)
+        if not resp.success():
+            raise RuntimeError(f"获取单条消息失败: code={resp.code} msg={resp.msg}")
+        items = (resp.data.items or []) if resp.data else []
+        if not items:
+            raise RuntimeError(f"获取单条消息失败: 消息不存在 (message_id={message_id})")
+        item = items[0]
+        body = _get(item, "body", default=None)
+        msg_type = _get(item, "msg_type")
+        extracted = _extract_content(msg_type, _get(body, "content", default="{}"))
+        sender = _get(item, "sender", default=None)
+        return {
+            "message_id": _get(item, "message_id"),
+            "chat_id": _get(item, "chat_id"),
+            "msg_type": msg_type,
+            "text": extracted["text"],
+            "image_key": extracted["image_key"],
+            "file_key": extracted["file_key"],
+            "file_name": extracted["file_name"],
+            "open_id": _get(sender, "id") if _get(sender, "sender_type") == "user" else "",
+            "parent_id": _get(item, "parent_id"),
+        }
 
     def send_text(self, chat_id: str, text: str) -> str:
         """往指定会话发文本消息，返回飞书 message_id。"""

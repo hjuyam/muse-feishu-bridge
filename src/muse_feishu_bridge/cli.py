@@ -10,6 +10,7 @@
     python -m muse_feishu_bridge.cli react --message-id om_xxx --emoji Get
     python -m muse_feishu_bridge.cli react-batch om_a om_b [--emoji Get]
     python -m muse_feishu_bridge.cli unreact --message-id om_xxx --reaction-id xxx
+    python -m muse_feishu_bridge.cli get-message --message-id om_xxx  # 取单条消息（引用取原文）
 """
 from __future__ import annotations
 
@@ -157,14 +158,19 @@ def cmd_listen(args) -> int:
     sender_thread.start()
 
     def _save_attachment(msg: dict) -> None:
-        """下载图片/文件附件落盘 data/attachments/<message_id>/，回填 msg。
+        """下载图片/文件/音频/视频附件落盘 data/attachments/<message_id>/，回填 msg。
 
+        audio（语音条）、media/video（视频）的 content 均为 file_key 形态，
+        与 file 走同一下载路子（飞书官方无 voice 类型，语音消息即 audio）。
         下载失败不抛异常：任务不能丢，失败原因写进 text，worker 会如实转告用户。
         """
-        kind = "image" if msg.get("msg_type") == "image" else "file"
+        msg_type = msg.get("msg_type")
+        kind = "image" if msg_type == "image" else ("audio" if msg_type == "audio" else "file")
+        label = {"image": "图片", "audio": "语音", "media": "视频",
+                 "video": "视频", "file": "文件"}.get(msg_type or "", "附件")
         key = msg.get("image_key") or msg.get("file_key")
         if not key:
-            msg["text"] = (msg.get("text") or "") + f"[{'图片' if kind == 'image' else '文件'}消息，无附件 key]"
+            msg["text"] = (msg.get("text") or "") + f"[{label}消息，无附件 key]"
             return
         try:
             if kind == "image":
@@ -187,7 +193,8 @@ def cmd_listen(args) -> int:
         msg["file_name"] = name
         msg["attachments"] = [{"kind": kind, "name": name, "path": str(dest)}]
         if not msg.get("text"):
-            msg["text"] = "[图片]" if kind == "image" else f"[文件：{name}]"
+            msg["text"] = {"image": "[图片]", "audio": "[语音]"} \
+                .get(kind, f"[{'视频' if (msg.get('msg_type') in ('media', 'video')) else '文件'}：{name}]")
         print(f"附件已下载: {dest} ({len(data)} 字节)")
 
     def on_message(msg: dict) -> bool:
@@ -207,7 +214,17 @@ def cmd_listen(args) -> int:
         if inbox.exists(cfg.bridge.inbox_path, msg.get("message_id") or ""):
             print(f"重复跳过: {msg.get('message_id')}")
             return False
-        if msg_type in ("image", "file"):
+        # Get 移入 Listen（2026-10-12）：长连接收到消息的瞬间就加 Get 表情，
+        # 不再等 hook 的 30 秒轮询。写在收件箱之前：成功则 reaction_id 直接
+        # 回填进记录，hook 的 react-batch 会跳过已有 reaction_id 的记录，
+        # 天然幂等不重复。尽力而为：失败不阻塞收件，hook 侧会兜底补 Get。
+        try:
+            msg["reaction_id"] = media_bridge.add_reaction(
+                msg.get("message_id") or "", "Get")
+            print(f"Get 已加: {msg.get('message_id')}")
+        except Exception as e:  # noqa: BLE001
+            print(f"Get 表情失败（hook 将兜底） {msg.get('message_id')}: {e}")
+        if msg_type in ("image", "file", "audio", "media", "video"):
             _save_attachment(msg)
         elif msg_type == "post" and not msg.get("text"):
             msg["text"] = "[富文本消息]"
@@ -388,6 +405,28 @@ def cmd_history(args) -> int:
     return 0
 
 
+def cmd_get_message(args) -> int:
+    """按 message_id 取单条消息（引用场景：凭 parent_id 取被引用原文）。"""
+    from .feishu_client import FeishuBridge
+
+    cfg = load_config(args.config)
+    bridge = FeishuBridge(cfg.feishu.app_id, cfg.feishu.app_secret, on_message=lambda m: None)
+    try:
+        m = bridge.get_message(args.message_id)
+    except RuntimeError as e:
+        print(str(e))
+        return 1
+    print(f"message_id: {m['message_id']}")
+    print(f"msg_type: {m['msg_type']}")
+    print(f"chat_id: {m['chat_id']}")
+    if m.get("parent_id"):
+        print(f"parent_id: {m['parent_id']}")
+    if m.get("file_name"):
+        print(f"file_name: {m['file_name']}")
+    print(f"text: {m['text'][:500]}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="muse-feishu-bridge", description="把 Meta Muse 接入飞书的传输桥")
     p.add_argument("--config", default="config.yaml")
@@ -419,12 +458,15 @@ def main(argv=None) -> int:
     u.add_argument("--message-id", required=True)
     u.add_argument("--reaction-id", required=True)
     sub.add_parser("history", help="查看未处理消息")
+    g = sub.add_parser("get-message", help="按 id 取单条消息（引用场景：凭 parent_id 取被引用原文）")
+    g.add_argument("--message-id", required=True, help="飞书 message_id，如 om_xxx")
     args = p.parse_args(argv)
     return {"doctor": cmd_doctor, "listen": cmd_listen,
             "send": cmd_send, "enqueue": cmd_enqueue, "flush": cmd_flush,
             "react": cmd_react,
             "react-batch": cmd_react_batch,
-            "unreact": cmd_unreact, "history": cmd_history}[args.cmd](args)
+            "unreact": cmd_unreact, "history": cmd_history,
+            "get-message": cmd_get_message}[args.cmd](args)
 
 
 if __name__ == "__main__":
