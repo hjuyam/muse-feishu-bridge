@@ -7,7 +7,7 @@
 
 | 场景 | 配置会丢吗 | 恢复方式 |
 |---|---|---|
-| VM 重启（reboot） | **不丢**。`config.yaml`、`.venv/`、`data/` 都在磁盘上 | 全自动：VM 上的调度器恢复 30s 轮询后，`hooks` 脚本检测到 `listen` 进程不在会自动拉起（`scripts/run_listen.sh`），几十秒内恢复 |
+| VM 重启（reboot） | **不丢**。`config.yaml`、`.venv/`、`data/` 都在磁盘上 | 全自动：平台 cron 看门狗（`scripts/listen-watchdog.sh`）每 2 分钟检测到 `listen` 不在就用 `scripts/run_listen.sh` 拉起；hook 脚本只做存活检测，拉起失败才唤醒 worker 告警 |
 | VM 重置 / 重装镜像 | **全丢**。`config.yaml`（app_id/app_secret、白名单）、`.venv/`、`data/inbox.jsonl`、`~/hooks/` 下的脚本与定义都不在 git 里 | 按下面步骤手动重建 |
 
 ## 重置后的重建步骤（约 10 分钟）
@@ -33,7 +33,7 @@ export PYTHONPATH=src
 #    Muse 会按你的运行时改好 delivery 占位符并注册
 bash hooks/feishu-inbox-watch.sh   # 无 hook runtime 时只打印到 stdout，可先手工验证逻辑
 
-# 6. 手动起一次 listen（之后由 hooks 脚本保活）
+# 6. 手动起一次 listen（之后由 run_listen.sh 进程自重启 + cron 看门狗保活）
 setsid nohup scripts/run_listen.sh >/dev/null 2>&1 < /dev/null &
 ```
 
@@ -47,7 +47,7 @@ setsid nohup scripts/run_listen.sh >/dev/null 2>&1 < /dev/null &
 
 | 情况 | 处理 |
 |---|---|
-| 在开放平台**重置了 App Secret** | 更新 `config.yaml`，重启 listen（kill 旧进程，hooks 30s 内自动拉起新的） |
+| 在开放平台**重置了 App Secret** | 更新 `config.yaml`，重启 listen（kill 旧进程，cron 看门狗 2 分钟内自动拉起新的） |
 | 应用被停用 / 删除 | 在开放平台恢复或重建应用，按上面重建步骤走 |
 | 管理员收回机器人权限 / 取消事件订阅 | 在开放平台重新开通权限、订阅 `im.message.receive_v1`，然后**重新发布版本** |
 | 发布了新版本但未发布到线上 | 版本管理 → 发布，线上版本才生效 |

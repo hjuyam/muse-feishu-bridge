@@ -53,14 +53,13 @@ worker 重复调用 `cli send` 不会发出两条；Muse 重启后从收件箱�
 
 ## 可靠性
 
-- **断线重连**：`cli listen` 主循环捕获任何返回/异常后指数退避重连（5s→300s；
-  单次运行超 60s 则重置退避）。SDK 在某些场景（如 no close frame）会直接返回，
-  不靠它内部重连。
-- **进程保活**：两层。① listen 自重启：`scripts/run_listen.sh` 在 python 进程
-  退出后 10 秒重拉（连续 5 次 30 秒内快崩则等 5 分钟再试）；② 外部看门狗：
-  `scripts/listen-watchdog.sh` 挂在平台 cron 上每 2 分钟跑一次，pgrep 发现
-  listen 不在就拉起。hook 脚本每 30 秒只做检测与告警——它的运行时不允许拉起
-  常驻进程（超时后会杀掉本轮进程树），worker 会话结束同样会回收子进程。
+- **保活链（三层）**：① 断线重连：`cli listen` 主循环捕获任何返回/异常后指数
+  退避重连（5s→300s；单次运行超 60s 则重置退避；SDK 在某些场景如 no close
+  frame 会直接返回，不靠它内部重连）；② 进程自重启：`scripts/run_listen.sh`
+  在 python 进程退出后 10 秒重拉（连续 5 次 30 秒内快崩则等 5 分钟再试）；
+  ③ 外部看门狗：`scripts/listen-watchdog.sh` 挂在平台 cron 上每 2 分钟跑一次，
+  pgrep 发现 listen 不在就拉起。hook 脚本每 30 秒只做检测与告警——它的运行时
+  不允许拉起常驻进程（超时后会杀掉本轮进程树），worker 会话结束同样会回收子进程。
 - **断线补拉**：飞书长连接不补发断线期间的消息。每次（重）连前调
   `im.v1.message.list` 拉取各已知会话最近 50 条历史，按 `message_id` 去重写入
   收件箱（幂等）。已知会话来自收件箱历史里的 `chat_id`。
@@ -78,8 +77,9 @@ worker 重复调用 `cli send` 不会发出两条；Muse 重启后从收件箱�
 - 凭证只走 `config.yaml` / 环境变量，`.gitignore` 已排除。
 - `allow_open_ids` 白名单：默认只处理你自己的消息，防止陌生人使唤你的 Muse。
 - 飞书应用最小权限：`im:message`（发）+ `im.message.receive_v1`（收）。
-- 长连接断线重连由 SDK 内部处理；Muse 侧用 hook 脚本兼做保活：每 30 秒检查 `listen`
-  进程，掉了自动拉起（`scripts/run_listen.sh`），重启失败才唤醒 Muse 人工介入。
+- 保活链（见上文"可靠性"一节）：listen 内部断线重连 → `run_listen.sh`
+  进程退出自重启 → cron 看门狗每 2 分钟外部兜底。hook 脚本和被唤醒的
+  worker 只做存活检测与告警，不拉起常驻进程（它们的运行时会回收子进程）。
 
 ## 消息处理时序图
 

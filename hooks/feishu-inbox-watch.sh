@@ -2,9 +2,15 @@
 # feishu-inbox-watch：飞书桥的事件触发器（polling script 模板）。
 #
 # 每 30 秒跑一次，做两件事：
-#   1. 保活：listen 长连接进程不在时自动拉起；
+#   1. 存活检测：listen 长连接进程还在吗——只做检测与告警（唤醒 worker），不拉起；
 #   2. 扫收件箱：有 status=new 的消息时唤醒一个 worker（Muse）来处理。
 #
+# 保活的真正承担方（不在这个脚本里）：三层链路
+#   ① cli listen 内部断线重连（主循环指数退避）；
+#   ② scripts/run_listen.sh 进程级自重启（python 退出后 10 秒重拉）；
+#   ③ 平台 cron 每 2 分钟跑 scripts/listen-watchdog.sh 外部兜底。
+# （实测教训：hook 脚本和被唤醒 worker 会话里拉起的常驻进程都会被运行时
+# 回收——2026-10-11 曾出现"拉起→30 秒被杀→下轮再拉起"的 89 次重启风暴。）
 # 运行时契约（由你的 agent 调度环境提供）：
 #   - 环境变量 HATCH_HOOK_RUNTIME：一个可 source 的 shell 片段，
 #     提供 log / silent / wake 三个函数：
@@ -43,17 +49,27 @@ fi
 mkdir -p "$STATE_DIR"
 [ -f "$SEEN" ] || echo '{}' > "$SEEN"
 
-# ---- 1. 保活：listen 进程还在吗 ----
+# ---- 1. 存活检测：listen 进程还在吗 ----
+# 只做检测与告警，不拉起。拉起的权唯一归属三层保活链：
+# listen 内部断线重连 → run_listen.sh 进程退出自重启 →
+# 平台 cron 每 2 分钟的 listen-watchdog.sh 外部兜底。
+# （hook 脚本和被唤醒的 worker 会话里拉起的常驻进程都会被运行时回收，
+# 2026-10-11 实测"拉起→30 秒被杀→下轮再拉起"造成了 89 次重启风暴；
+# worker 手动拉起会和看门狗竞态产生双进程。所以这里只检测，掉了就告警。）
 if ! pgrep -f "[m]use_feishu_bridge[.]cli listen" >/dev/null 2>&1; then
-  log "listen 进程不在，尝试重启"
-  (cd "$BRIDGE" && setsid nohup scripts/run_listen.sh >/dev/null 2>&1 < /dev/null &)
-  sleep 8
-  if pgrep -f "[m]use_feishu_bridge[.]cli listen" >/dev/null 2>&1; then
-    log "listen 重启成功"
+  now=$(date +%s)
+  last_wake=$(cat "$STATE_DIR/listen_down_waked_at" 2>/dev/null || echo 0)
+  case "$last_wake" in ''|*[!0-9]*) last_wake=0 ;; esac
+  if [ $(( now - last_wake )) -gt 600 ]; then
+    echo "$now" > "$STATE_DIR/listen_down_waked_at"
+    log "listen 进程不在，已唤醒 worker 检查"
+    wake "飞书监听进程不在" '{"event":"listen_restart_failed"}'
   else
-    wake "飞书监听进程掉了且重启失败" '{"event":"listen_restart_failed"}'
-    exit 0
+    silent "监听进程不在，10 分钟内已唤醒过 worker，等待恢复" '{}'
   fi
+else
+  # listen 存活：清除唤醒冷却标记
+  rm -f "$STATE_DIR/listen_down_waked_at"
 fi
 
 # ---- 2. 收件箱：找 status=new 的消息 ----

@@ -1,9 +1,12 @@
 # hooks/ —— 事件触发器模板（"完整解决方案"的一部分）
 
-本目录是把桥从"能跑"变成"长期在线"的关键一环：**轮询 + 保活 + 唤醒**。
+本目录是把桥从"能跑"变成"长期在线"的关键一环：**轮询 + 存活检测 + 唤醒**。
 原理：一个定时运行的脚本每 30 秒扫一次收件箱（`data/inbox.jsonl`），
 有 `status=new` 的消息才唤醒一个 Muse worker 来处理；平时零开销。
-同时它兼做 `listen` 长连接进程的保活：进程掉了自动拉起，拉不起来才告警。
+同时它检测 `listen` 长连接进程的存活：进程掉了就告警（唤醒 worker 检查），
+但自己不拉起——拉起的权唯一归三层保活链：listen 内部断线重连 →
+`scripts/run_listen.sh` 进程退出自重启 → 平台 cron 每 2 分钟的
+`scripts/listen-watchdog.sh` 外部兜底。
 
 ## 文件
 
@@ -37,10 +40,13 @@
 `wake` 传过去的事件只有两种（见 JSON 模板里的 `prompt`，那就是 worker 的指令）：
 
 1. `{"event":"new_messages","message_ids":[...]}` —— 处理收件箱里的新消息并回飞书。
-   worker 对每条消息还要做表情反馈：开始处理前加 `Get` 表情（已收到），
-   处理完并经发件队列确认"已发送"后删掉 `Get`、换上 `DONE`（处理完）——
-   `cli send --inbox-message-id om_xxx` 会在确认后自动完成这一步。命令见主 README。
-2. `{"event":"listen_restart_failed"}` —— listen 进程掉了且脚本重启失败，需要人工介入
+   worker 对每条消息还要做表情反馈：`Get`（"已收到"）由 `listen` 长连接在收信时
+   1~2 秒内同步加；wake 前脚本再对漏加的用 `react-batch` 批量补加，并把
+   `reaction_id` 回填进收件箱记录——worker 直接复用该值，不用自己加。
+   处理完并经发件队列确认"已发送"后，`cli send --inbox-message-id om_xxx`
+   自动删 `Get` 换 `DONE`（"处理完"）。命令见主 README。
+2. `{"event":"listen_restart_failed"}` —— `listen` 长连接进程不在（脚本只做检测，
+   不拉起）：worker 负责检查三层保活链是否正常工作，拉不起来才需要人工介入
 
 ## 重建（VM 重置后）
 
