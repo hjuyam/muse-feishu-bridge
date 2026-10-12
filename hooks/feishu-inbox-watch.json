@@ -12,5 +12,5 @@
   "script_path": "~/hooks/scripts/feishu-inbox-watch.sh",
   "script_timeout_secs": 30,
   "updated_at_ms": 1791775171301,
-  "version": 2
+  "version": 1
 }
