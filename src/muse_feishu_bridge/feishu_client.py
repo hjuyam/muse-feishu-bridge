@@ -24,6 +24,7 @@ from lark_oapi.api.im.v1 import (
     GetFileRequest,
     GetImageRequest,
     GetMessageRequest,
+    GetMessageResourceRequest,
     ListMessageRequest,
     P2ImMessageReceiveV1,
 )
@@ -353,14 +354,52 @@ class FeishuBridge:
         name = resp.file_name or f"{key}.bin"
         return b"".join(chunks), name
 
-    def download_image(self, image_key: str) -> tuple[bytes, str]:
-        """按 image_key 下载图片，返回 (文件字节, 文件名)。失败抛 RuntimeError。"""
+    def download_message_resource(self, message_id: str, key: str,
+                                  resource_type: str) -> tuple[bytes, str]:
+        """按 (message_id, file_key/image_key) 下载消息中的资源，返回 (文件字节, 文件名)。
+
+        飞书规定旧接口 im/v1/images|files/:key 只能下载应用自己上传的资源，
+        用户发来的附件必报 234008（The app is not the resource sender）；
+        必须走消息资源接口 im/v1/messages/:message_id/resources/:file_key
+        （需要应用开通 im:resource 权限），resource_type 只能是 image 或 file。
+        失败抛 RuntimeError。
+        """
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(key)
+            .type(resource_type)
+            .build()
+        )
+        resp = self._client.im.v1.message_resource.get(request)
+        return self._read_download(resp, {"image": "图片"}.get(resource_type, "文件"), key)
+
+    def download_image(self, image_key: str, message_id: str = "") -> tuple[bytes, str]:
+        """按 image_key 下载图片，返回 (文件字节, 文件名)。失败抛 RuntimeError。
+
+        message_id 传入时优先走消息资源接口（用户发来的图片）；
+        失败回退旧接口（应用自己上传的图片）。
+        """
+        if message_id:
+            try:
+                return self.download_message_resource(message_id, image_key, "image")
+            except RuntimeError as e:
+                print(f"消息资源接口下载图片失败，回退旧接口: {e}")
         request = GetImageRequest.builder().image_key(image_key).build()
         resp = self._client.im.v1.image.get(request)
         return self._read_download(resp, "图片", image_key)
 
-    def download_file(self, file_key: str) -> tuple[bytes, str]:
-        """按 file_key 下载文件，返回 (文件字节, 文件名)。失败抛 RuntimeError。"""
+    def download_file(self, file_key: str, message_id: str = "") -> tuple[bytes, str]:
+        """按 file_key 下载文件，返回 (文件字节, 文件名)。失败抛 RuntimeError。
+
+        message_id 传入时优先走消息资源接口（用户发来的文件/语音/视频）；
+        失败回退旧接口（应用自己上传的文件）。
+        """
+        if message_id:
+            try:
+                return self.download_message_resource(message_id, file_key, "file")
+            except RuntimeError as e:
+                print(f"消息资源接口下载文件失败，回退旧接口: {e}")
         request = GetFileRequest.builder().file_key(file_key).build()
         resp = self._client.im.v1.file.get(request)
         return self._read_download(resp, "文件", file_key)

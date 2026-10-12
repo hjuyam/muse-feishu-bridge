@@ -223,10 +223,13 @@ def cmd_listen(args) -> int:
             msg["text"] = (msg.get("text") or "") + f"[{label}消息，无附件 key]"
             return
         try:
+            # message_id 必传：用户发来的附件必须走消息资源接口下载，
+            # 旧接口只能下载应用自己上传的资源（会报 234008）。
+            mid = msg.get("message_id") or ""
             if kind == "image":
-                data, name = media_bridge.download_image(key)
+                data, name = media_bridge.download_image(key, mid)
             else:
-                data, name = media_bridge.download_file(key)
+                data, name = media_bridge.download_file(key, mid)
         except Exception as e:  # noqa: BLE001 -- 下载失败也要收件，不能丢任务
             msg["text"] = (msg.get("text") or "") + f"\n[附件下载失败：{e}]"
             print(f"附件下载失败 {msg.get('message_id')}: {e}")
