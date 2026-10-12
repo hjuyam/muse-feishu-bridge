@@ -6,16 +6,20 @@
   "chat_id": "oc_xxx",         # 回复时发回这个会话
   "chat_type": "p2p",
   "open_id": "ou_xxx",         # 发送者
-  "msg_type": "text",        # text / post(富文本，已转纯文本) / image / file
+  "msg_type": "text",        # text / post(富文本，已转纯文本) / image / file /
+                            # audio(语音条) / media、video(视频) / merge_forward(合并转发)
   "text": "帮我查一下...",
   "image_key": "",          # 图片消息的飞书 key（image 类型有）
-  "file_key": "",           # 文件消息的飞书 key（file 类型有）
+  "file_key": "",           # 文件/语音/视频消息的飞书 key
   "file_name": "",          # 文件名（下载响应返回）
   "attachments": [],        # 已下载到本地的附件 [{kind, name, path}]，path 为仓库相对路径
   "received_at": 1729000000.0,
   "status": "new",             # new -> done
   "reply": "",                 # Muse 处理完可回填（可选）
-  "reaction_id": "on_xxx"      # 可选：轮询脚本抢加 Get 后回填，worker 沿用
+  "reaction_id": "on_xxx",     # 可选：listen 收件时同步加的 Get 表情 id；
+                               # 无则由轮询脚本抢加后回填，worker 沿用
+  "parent_id": "om_xxx",       # 可选：引用/回复场景下被引用消息的 id
+  "raw_content": "{...}",      # 可选：merge_forward 的原文 JSON
 }
 
 并发说明：listen 进程（append）与 worker（mark_done）是两个进程，可能同时
@@ -110,7 +114,14 @@ def _maybe_rotate(path: Path) -> None:
 
 
 def append(path: str | Path, message: dict) -> bool:
-    """追加一条消息；已存在的 message_id 返回 False（去重）。"""
+    """追加一条消息；已存在的 message_id 返回 False（去重）。
+
+    除基础字段外，还透传以下上游字段（有则写，无则略）：
+    - reaction_id：listen 收到消息时同步加的 Get 表情 id，供 hook 的
+      react-batch 跳过、worker 的 Get→DONE 切换沿用；
+    - parent_id：引用/回复场景下被引用消息的 message_id；
+    - raw_content：merge_forward 的原文 JSON（content 为占位符时）。
+    """
     path = Path(path)
     _maybe_rotate(path)
     record = {
@@ -128,6 +139,9 @@ def append(path: str | Path, message: dict) -> bool:
         "status": "new",
         "reply": "",
     }
+    for key in ("reaction_id", "parent_id", "raw_content"):
+        if message.get(key):
+            record[key] = message[key]
     with _locked(path, "a+", exclusive=True) as f:
         for line in _read_lines(f):
             try:
